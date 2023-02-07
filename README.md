@@ -71,7 +71,7 @@ injector.get(App)
 ```
 
 A few observations:
-1. Ee use `to_instance` to bind `ConfigurationProvider` to an specific instance that will act as singleton.
+1. We use `to_instance` to bind `ConfigurationProvider` to an specific instance that will act as singleton.
 2. `to_constructor` helps us use a function helper to build the instance. Note that the instance will still behave as singleton, the functions will not be called for each usage.
 3. `with_kwargs` allows us to define the value of some of the parameters of the class. This `CacheClient` might have a signature `__init__(self, cfg: ConfigurationProvider, pool: str)`. The `cfg` variable can be injected, but pool is a scalar so needs to be set to a particular value.
 4. We use `to_class` to bind `Events` that is an abstract class with the interface to `KafkaEvents` that implements it using Kafka. We also define the queue name to use using `with_kwargs` to override the `queue` param.
@@ -223,7 +223,7 @@ The injector will refuse to build `Optional` and `Union` types by default, as it
 For `Optional[Foo]` and `Union[Foo, Bar]` types binding just `Foo` will not work. You can `bind(Optional[Foo])` and `bind[Foo, Bar]` and map them normally to a instance, concrete class or constructor.
 
 ## Best practices
-* Keep configuration settings out of your application-level classes' constructors, so more of them can be built automatically. You can use a `Configu'ationProvider` dependency to provide configuration settings to your app.
+* Keep configuration settings out of your application-level classes' constructors, so more of them can be built automatically. You can use a `ConfigurationProvider` dependency to provide configuration settings to your app.
 * Avoid Union for dependencies when possible, use Protocol or Abstract as they should have compatible apis.
 * If is ok to have low-level dependencies (data access, ...) with configuration or as abstract / Protocol classes that force injecting a concrete instance and/or configuration.
 * Build a production entry point separated from test and local envs, that is the only one that configures the injector for production.
