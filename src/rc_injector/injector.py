@@ -310,7 +310,10 @@ class TypeResolver(Generic[T]):
                     "on the class that needs the param"
                 )
 
-    def resolve_type(self, injector: "Injector") -> T:
+    def get_cached_instance(self) -> Optional[T]:
+        return self._to_instance
+
+    def resolve_type(self, injector: "InjectorContext") -> T:
         if self._to_instance is not None:
             return self._to_instance
         if self._to_class is not None:
@@ -341,7 +344,7 @@ class TypeResolver(Generic[T]):
             if overriden_param_type := self._arg_types.get(param.name):
                 kwargs[param.name] = injector.get(overriden_param_type)
                 continue
-            is_binded = injector.has_configured_bindings(param.type)
+            is_binded = injector.configuration.has_configured_bindings(param.type)
             has_default_value = param.default != inspect.Parameter.empty
             if has_default_value and not is_binded:
                 # There is a default value for the param, so
@@ -436,33 +439,50 @@ class Configuration:
 
 class Injector:
     _configuration: Configuration
-    _stack: List[Type[Any]]
 
     def __init__(self, configuration: Configuration) -> None:
         self._configuration = configuration
-        self._stack: List[Type[Any]] = []
 
-    def get(self, cls: Union[Type[T], Abstract[T]]) -> T:
+    def get(
+        self,
+        cls: Union[Type[T], Abstract[T]],
+        parent_cls: Optional[Type[Any]] = None,
+    ) -> T:
         # Abstract is just a trick to make mypy like
         # abstract types passed into our injector
         assert not isinstance(cls, Abstract)  # noqa: S101
-        if cls in self._stack:
+        if type_resolver := self._configuration.get_type_resolver(cls, parent_cls):
+            # Fast path for already cached instances, and avoid having to
+            # create a new injection context
+            if instance := type_resolver.get_cached_instance():
+                return instance
+        # Create a new injection context and get the instance from it
+        return InjectorContext(configuration=self._configuration).get(cls)
+
+
+class InjectorContext:
+    configuration: Configuration
+    stack: List[Type[Any]]
+
+    def __init__(self, configuration: Configuration) -> None:
+        self.configuration: Configuration = configuration
+        self.stack: List[Type[Any]] = []
+
+    def get(self, cls: Type[T]) -> T:
+        if cls in self.stack:
             raise CircularDependencyError(
-                f"Unable to instantiate {self._stack[0]} because {cls} "
+                f"Unable to instantiate {self.stack[0]} because {cls} "
                 "causes a circular dependency. To build it, "
-                f"ultimately {self._stack[-1]} is needed that needs {cls} "
-                f"again. Dependency stack is: {self._stack}"
+                f"ultimately {self.stack[-1]} is needed that needs {cls} "
+                f"again. Dependency stack is: {self.stack}"
             )
-        parent_cls = self._stack[-1] if self._stack else None
-        type_resolver = self._configuration.get_type_resolver(cls, parent_cls)
+        parent_cls = self.stack[-1] if self.stack else None
+        type_resolver = self.configuration.get_type_resolver(cls, parent_cls=parent_cls)
         if type_resolver is None:
             raise InjectorInstantiationError(f"Unable to find a TypeResolver for {cls}")
-        self._stack.append(cls)
+        self.stack.append(cls)
         try:
             instance = type_resolver.resolve_type(injector=self)
         finally:
-            self._stack.pop()
+            self.stack.pop()
         return instance
-
-    def has_configured_bindings(self, cls: Union[Type[T], Abstract[T]]) -> bool:
-        return self._configuration.has_configured_bindings(cls)
