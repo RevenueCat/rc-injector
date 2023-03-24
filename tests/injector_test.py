@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import time
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from typing import Generic, NewType, Optional, Protocol, Type, TypeVar, Union, cast
+from unittest.mock import Mock
 
 import pytest
 
@@ -11,8 +14,6 @@ from rc_injector import (
     InjectorConfigurationError,
     InjectorInstantiationError,
 )
-from unittest.mock import Mock
-
 from rc_injector.test_utils import (
     ErrorOnNotExplicitConfiguration,
     MockOnNotExplicitConfiguration,
@@ -544,3 +545,25 @@ def test_mock_on_not_explitict_bind_configuration() -> None:
     with pytest.raises(AttributeError):
         # Mock is checking the type and funcion signatures
         injector.get(Dependency).method_does_not_exist()  # type: ignore
+
+
+def test_concurrent_injection() -> None:
+    class A:
+        def __init__(self) -> None:
+            time.sleep(0.01)
+
+    configuration = Configuration()
+    configuration.bind(A).globally()
+    injector = Injector(configuration)
+
+    def task() -> bool:
+        return isinstance(injector.get(A), A)
+
+    threads = 20
+    with ThreadPoolExecutor() as executor:
+        running_tasks = [executor.submit(task) for _ in range(threads)]
+        ok = 0
+        for running_task in running_tasks:
+            if running_task.result():
+                ok += 1
+    assert ok == threads
