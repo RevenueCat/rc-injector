@@ -88,7 +88,7 @@ Since the dependency is already configured, no changes to dependency injection a
 
 Furthermore, tests will also use an injector. Integration tests might bind the real CacheClient to a local instance. Unit tests might mock it or provided a local implementation. So in this blueprint you won't need to worry about mocking cache client, worried about the test using production, etc.
 
-Now imagine is time for a refactor, we are going to split `FooBluePrint` into a few components and also use `Events`. Again, as long as there are no new low-level classes that require configuration, no changes to the injection are needed!
+Now imagine it's time for a refactor, we are going to split `FooBluePrint` into a few components and also use `Events`. Again, as long as there are no new low-level classes that require configuration, no changes to the injection are needed!
 
 ```patch:
 +class FooDataAccess:
@@ -112,7 +112,7 @@ configuration.bind(CacheClient).globally().with_kwargs(pool=CachePools.DEFAULT)
 ```
 
 ## API
-The bindinds and behavior of the injector are controlled with the `Configuration` class.
+The bindings and behavior of the injector are controlled with the `Configuration` class.
 
 ### Initialize
 To initialize the injector, a config is needed:
@@ -121,7 +121,7 @@ configuration = Configuration()
 injector = Injector(configuration)
 ```
 
-### Global bindinds:
+### Global bindings:
 Bind the given class to the configured type resolver.
 
 ```python:
@@ -150,7 +150,7 @@ This binding will only take effect for `Bar`. `Baz` will continue to see the def
 This returns a `TypeResolver[Foo]`, that can be further configured. See `TypeResolver` api below.
 
 ### Type resolver
-Once created the bind and set the scope (`bind(Foo).globally()` or `bind(Foo).for_parent(Bar)`) you will get a `TypeResolver` that allows to configure how the binded value will be resolved.
+Once created the bind and set the scope (`bind(Foo).globally()` or `bind(Foo).for_parent(Bar)`) you will get a `TypeResolver` that allows to configure how the bound value will be resolved.
 
 * `to_instance(instance)`: Binds to an specific instance. Useful for wiring globals into DI or when building the object is complicated and you prefer to control that.
 * `to_class(Bar)`: Binds to a class. Useful to inject a comparible subclass, the concrete implementation of an abstract class or a class that implements a Protocol.
@@ -162,7 +162,7 @@ Additionally, for the default and `to_constructor` resolutions, this extra confi
 * `with_arg_types(foo=Foo)`: Overrides the type that will be used for the param. Similar to `for_parent(...).to_class(...)` that can also override the class, but it can work when you have two args with the same type (imagine `Processor(in: Queue, out: Queue)`) and will also work for constructor functions.
 
 ### Cache and singletons
-The injector will cache **ALL** types, both specifically binded and those injected using the default. This means that **ALL classes will be singletons**.
+The injector will cache **ALL** types, both specifically bound and those injected using the default. This means that **ALL classes will be singletons**.
 
 Note that when binding the same class globally / for specific parents, obviously each one will get a different singleton.
 
@@ -230,12 +230,12 @@ For `Optional[Foo]` and `Union[Foo, Bar]` types binding just `Foo` will not work
 * Prepare a shared test-specific injector. Specially for integration tests so the plumbing of configuring dependencies for test environment is only done once.
   
 ## Testing-specific configurations
-This injector will try to build all classes not binded, and as long as no scalar or primitive values are needed, it will travered the dependency tree and boild all objects.
+This injector will try to build all classes not bound, and as long as no scalar or primitive values are needed, it will traverse the dependency tree and build all objects.
 
-For testing it might be interesting to mock by default or fail if a dependency is needed and not specifically binded in the test, so two configuration sub-classes are provided:
+For testing it might be interesting to mock by default or fail if a dependency is needed and not specifically bound in the test, so two configuration sub-classes are provided:
 
 ### ErrorOnNotExplicitConfiguration
-Will throw `ErrorOnNotExplicitConfiguration` for any class not binded.
+Will throw `ErrorOnNotExplicitConfiguration` for any class not bound.
 
 ```python:
     class Dependency:
@@ -259,7 +259,7 @@ Will throw `ErrorOnNotExplicitConfiguration` for any class not binded.
 ```
 
 ### MockOnNotExplicitConfiguration
-Will mock any classes not specifically binded.
+Will mock any classes not specifically bound.
 
 ```python:
     class Dependency:
