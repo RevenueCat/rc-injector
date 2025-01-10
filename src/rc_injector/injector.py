@@ -313,11 +313,11 @@ class TypeResolver(Generic[T]):
     def get_cached_instance(self) -> Optional[T]:
         return self._to_instance
 
-    def resolve_type(self, injector: "InjectorContext") -> T:
+    def resolve_type(self, injector_context: "InjectorContext") -> T:
         if self._to_instance is not None:
             return self._to_instance
         if self._to_class is not None:
-            return cast(T, injector.get(self._to_class))
+            return cast(T, injector_context.get(self._to_class))
         if self._to_constructor is not None:
             constructor = self._to_constructor
             params = self._get_params(constructor)
@@ -342,9 +342,11 @@ class TypeResolver(Generic[T]):
                 # Already provider in the configuration
                 continue
             if overriden_param_type := self._arg_types.get(param.name):
-                kwargs[param.name] = injector.get(overriden_param_type)
+                kwargs[param.name] = injector_context.get(overriden_param_type)
                 continue
-            is_binded = injector.configuration.has_configured_bindings(param.type)
+            is_binded = injector_context.configuration.has_configured_bindings(
+                param.type
+            )
             has_default_value = param.default != inspect.Parameter.empty
             if has_default_value and not is_binded:
                 # There is a default value for the param, so
@@ -357,7 +359,7 @@ class TypeResolver(Generic[T]):
                 param=param,
                 is_binded=is_binded,
             )
-            kwargs[param.name] = injector.get(param.type)
+            kwargs[param.name] = injector_context.get(param.type)
 
         try:
             instance = constructor(**kwargs)
@@ -424,14 +426,12 @@ class Configuration:
     def get_type_resolver(
         self, cls: Type[T], parent_cls: Optional[Type[Any]]
     ) -> Optional[TypeResolver[T]]:
-        type_resolver: Optional[TypeResolver[T]] = None
         if cls in self.bindings:
-            type_resolver = self.bindings[cls].get_type_resolver(parent_cls=parent_cls)
-        if not type_resolver:
+            return self.bindings[cls].get_type_resolver(parent_cls=parent_cls)
+        else:
             if cls not in self._default_type_resolvers:
                 self._default_type_resolvers[cls] = self._get_default_resolver(cls)
             return self._default_type_resolvers[cls]
-        return type_resolver
 
     def has_configured_bindings(self, cls: Union[Type[T], Abstract[T]]) -> bool:
         return cls in self.bindings
@@ -482,7 +482,7 @@ class InjectorContext:
             raise InjectorInstantiationError(f"Unable to find a TypeResolver for {cls}")
         self.stack.append(cls)
         try:
-            instance = type_resolver.resolve_type(injector=self)
+            instance = type_resolver.resolve_type(injector_context=self)
         finally:
             self.stack.pop()
         return instance

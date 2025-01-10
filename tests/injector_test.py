@@ -120,8 +120,7 @@ def test_bind_to_instance() -> None:
 def test_bind_abstract_to_class() -> None:
     class A(ABC):
         @abstractmethod
-        def greet(self) -> str:
-            ...
+        def greet(self) -> str: ...
 
     class A1(A):
         def greet(self) -> str:
@@ -164,8 +163,7 @@ def test_bind_abstract_to_class() -> None:
 
 def test_bind_protocol_to_class() -> None:
     class A(Protocol):
-        def greet(self) -> str:
-            ...
+        def greet(self) -> str: ...
 
     class A1:
         def greet(self) -> str:
@@ -222,6 +220,31 @@ def test_bind_to_constructor() -> None:
     configuration.bind(A).globally().to_constructor(build_A)
     injector = Injector(configuration)
     assert injector.get(B).a.foo == "custom"
+
+
+def test_bind_chained_to_constructor() -> None:
+    class A:
+        def __init__(self, foo: Optional[str] = None) -> None:
+            self.foo = foo
+
+    class B:
+        def __init__(self, a: A) -> None:
+            self.a = a
+
+    class C:
+        def __init__(self, b: B) -> None:
+            self.b = b
+
+    def build_A() -> A:
+        return A("custom")
+
+    configuration = Configuration()
+    configuration.bind(A).globally().to_constructor(build_A)
+    injector = Injector(configuration)
+    c = injector.get(C)
+    assert c.b.a.foo == "custom"
+    c_cached = injector.get(C)
+    assert id(c) == id(c_cached)
 
 
 def test_bind_to_constructor_with_dependencies_too() -> None:
