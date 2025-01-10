@@ -280,3 +280,12 @@ Will mock any classes not specifically binded.
     injector.get(Dependency).some_method.return_value = "TEST_VALUE"  # type: ignore
     assert injector.get(ClassToTest).dep.some_method() == "TEST_VALUE"
 ```
+
+# Develop
+
+Install `uv` (https://docs.astral.sh/uv/) and run:
+
+```bash:
+uv venv
+uv run --with nox nox
+```
