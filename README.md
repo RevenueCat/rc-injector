@@ -217,6 +217,67 @@ configuration.bind(Foo).globally().to_instance(override_foo)
 configuration.bind(Foo).for_parent(A).to_instance(override_foo)
 ```
 
+## Function Parameter Resolution
+
+The `Injector.resolve()` method allows you to wrap functions with automatic dependency injection. Injectable parameters (classes with bindings or non-primitive types) are automatically resolved from the DI container, while non-injectable parameters (primitives like `str`, `int`, `bool`, etc.) remain as required arguments.
+
+### Basic Usage
+
+```python
+class Screen:
+    def say(self, text: str):
+        print(text)
+
+def salute(medium: Screen, content: str):
+    medium.say(content)
+
+configuration = Configuration()
+configuration.bind(Screen).globally().to_instance(Screen())
+
+injector = Injector(configuration)
+new_salute = injector.resolve(salute)
+
+# Only 'content' is required - 'medium' is auto-injected
+new_salute("hello")
+```
+
+### Type Safety with `resolve()`
+
+The `resolve()` method returns `Callable[..., Any]` because Python's type system cannot express "a function with some parameters removed" when those parameters are determined dynamically at runtime.
+
+#### Runtime IDE Support (Automatic)
+
+The runtime signature (`__signature__`) is automatically modified, so modern IDEs (Pylance, PyCharm) will show accurate parameter hints when you use the resolved function:
+
+```python
+wrapped = injector.resolve(greet)
+wrapped(name="Alice")  # IDE autocomplete shows: name: str
+```
+
+#### Static Type Checking (Manual Annotation)
+
+For full static type safety with type checkers (mypy, pyright), manually annotate the resolved function:
+
+```python
+from typing import Callable
+
+def process_order(db: Database, user_id: str, items: list[str]) -> bool:
+    # ... implementation
+
+# Specify the signature after injection
+wrapped: Callable[[str, list[str]], bool] = injector.resolve(process_order)  # type: ignore
+
+# Now type checker validates all calls
+wrapped("user123", ["item1", "item2"])  # ✅ Valid
+wrapped(123, ["item1"])                  # ❌ Type error
+```
+
+**Trade-offs:**
+- ✅ Full type safety when annotated
+- ✅ Type checker validates parameter types and counts
+- ❌ Requires manual work per function
+- ❌ Annotations can drift from actual configuration
+
 ## Optional and Unions
 The injector will refuse to build `Optional` and `Union` types by default, as it doesn't know what of the multiple choices to injects.
 

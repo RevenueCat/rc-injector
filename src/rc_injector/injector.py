@@ -1,3 +1,4 @@
+import functools
 import inspect
 import typing
 from typing import (
@@ -8,6 +9,7 @@ from typing import (
     List,
     NamedTuple,
     Optional,
+    Tuple,
     Type,
     TypeVar,
     Union,
@@ -15,8 +17,11 @@ from typing import (
 )
 
 T = TypeVar("T")
+F = TypeVar("F", bound=Callable[..., Any])
+
 
 PRIMITIVE_TYPES = {
+    bool,
     bytes,
     dict,
     float,
@@ -458,6 +463,159 @@ class Injector:
                 return instance
         # Create a new injection context and get the instance from it
         return InjectorContext(configuration=self._configuration).get(cls)
+
+    def _classify_function_params(
+        self, fn: Callable[..., Any]
+    ) -> Tuple[List[Param], List[str]]:
+        """
+        Classify function parameters into injectable and required.
+
+        Returns:
+            (injectable_params, required_param_names)
+        """
+        # Use TypeResolver to extract parameters (reuse existing logic)
+        temp_resolver = TypeResolver(type(None))
+        params = temp_resolver._get_params(fn, is_init=False)
+
+        injectable_params: List[Param] = []
+        required_param_names: List[str] = []
+
+        for param in params:
+            # Check if this parameter should be injectable
+            is_injectable = False
+
+            # Skip if untyped
+            if not param.type or param.type == inspect.Parameter.empty:
+                required_param_names.append(param.name)
+                continue
+
+            # Skip if primitive type
+            if param.type in PRIMITIVE_TYPES:
+                required_param_names.append(param.name)
+                continue
+
+            # Check if explicitly bound
+            is_binded = self._configuration.has_configured_bindings(param.type)
+            has_default_value = param.default != inspect.Parameter.empty
+
+            # If has default value and no binding, keep as required (honor default)
+            if has_default_value and not is_binded:
+                required_param_names.append(param.name)
+                continue
+
+            # Try to validate if parameter can be built
+            try:
+                temp_resolver._check_param_can_be_built(
+                    constructor=fn,
+                    param=param,
+                    is_binded=is_binded,
+                )
+                is_injectable = True
+            except InjectorConfigurationError:
+                # Can't be built, keep as required
+                is_injectable = False
+
+            if is_injectable or is_binded:
+                injectable_params.append(param)
+            else:
+                required_param_names.append(param.name)
+
+        return injectable_params, required_param_names
+
+    def resolve(self, fn: F) -> Callable[..., Any]:
+        """
+        Resolve function dependencies, returning a wrapper that auto-injects.
+
+        The returned function has injectable parameters automatically resolved from
+        the DI container. Only non-injectable parameters (primitives, untyped, etc.)
+        remain as required arguments.
+
+        The return type is Callable[..., Any] because Python's type system cannot
+        express "function with some parameters removed." However, the runtime
+        signature (via __signature__) is correctly modified, so IDEs will show
+        accurate autocomplete for the wrapped function.
+
+        For full static type safety, you can manually annotate the resolved function:
+
+            def greet(screen: Screen, name: str, count: int = 1) -> str:
+                return f"{screen.display(name)} x{count}"
+
+            # Manual annotation provides full type checking
+            wrapped: Callable[[str], str] = injector.resolve(greet)  # type: ignore
+            wrapped("Alice")  # ✅ Type checker validates this
+            wrapped(123)      # ❌ Type error: Expected str, got int
+
+        Example:
+            class Screen:
+                def say(self, text: str):
+                    print(text)
+
+            def salute(medium: Screen, content: str):
+                medium.say(content)
+
+            configuration = Configuration()
+            configuration.bind(Screen).globally().to_instance(Screen())
+
+            injector = Injector(configuration)
+            new_salute = injector.resolve(salute)
+
+            # Only 'content' is required - 'medium' is auto-injected
+            new_salute("hello")
+
+            # Check runtime signature to see actual parameters
+            import inspect
+            print(inspect.signature(new_salute))  # (content: str) -> None
+
+        Args:
+            fn: The function to wrap with dependency injection
+
+        Returns:
+            A wrapper function with injectable parameters resolved automatically.
+            For static type safety, manually annotate with the expected signature.
+        """
+        # Extract and classify parameters
+        injectable_params, required_param_names = self._classify_function_params(fn)
+
+        # Create wrapper function
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            # Create context for dependency resolution
+            context = InjectorContext(self._configuration)
+
+            # Resolve injectable parameters
+            resolved_kwargs: Dict[str, Any] = {}
+            for param in injectable_params:
+                try:
+                    resolved_kwargs[param.name] = context.get(param.type)
+                except InjectorError as e:
+                    raise InjectorInstantiationError(
+                        f"Unable to resolve parameter '{param.name}' "
+                        f"of type {param.type} for function {fn.__name__}: {e}"
+                    ) from e
+
+            # Map positional args to parameter names
+            provided_kwargs: Dict[str, Any] = {}
+            for i, arg in enumerate(args):
+                if i < len(required_param_names):
+                    provided_kwargs[required_param_names[i]] = arg
+            provided_kwargs.update(kwargs)
+
+            # Merge and call (user args override resolved dependencies)
+            final_kwargs = {**resolved_kwargs, **provided_kwargs}
+            return fn(**final_kwargs)
+
+        # Modify signature to only show required parameters
+        original_sig = inspect.signature(fn)
+        new_params = [
+            p
+            for p in original_sig.parameters.values()
+            if p.name in required_param_names
+        ]
+        wrapper.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
+            parameters=new_params, return_annotation=original_sig.return_annotation
+        )
+
+        return wrapper
 
 
 class InjectorContext:

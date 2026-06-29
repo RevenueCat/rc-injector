@@ -590,3 +590,407 @@ def test_concurrent_injection() -> None:
             if running_task.result():
                 ok += 1
     assert ok == threads
+
+
+# Tests for resolve() method
+def test_resolve_function_with_single_injectable_param() -> None:
+    class Screen:
+        def say(self, text: str) -> str:
+            return f"Screen: {text}"
+
+    def salute(medium: Screen, content: str) -> str:
+        return medium.say(content)
+
+    configuration = Configuration()
+    screen_instance = Screen()
+    configuration.bind(Screen).globally().to_instance(screen_instance)
+
+    injector = Injector(configuration)
+    new_salute = injector.resolve(salute)
+
+    # Test that medium is injected, only content is required
+    result = new_salute("hello")
+    assert result == "Screen: hello"
+
+    # Test with keyword argument
+    result = new_salute(content="world")
+    assert result == "Screen: world"
+
+
+def test_resolve_function_with_multiple_params() -> None:
+    class Logger:
+        def log(self, msg: str) -> str:
+            return f"LOG: {msg}"
+
+    class Database:
+        def save(self, data: str) -> str:
+            return f"SAVED: {data}"
+
+    def process(user_input: str, logger: Logger, db: Database, debug: bool) -> str:
+        logger.log(user_input)
+        db.save(user_input)
+        return f"Processed: {user_input}, debug={debug}"
+
+    configuration = Configuration()
+    configuration.bind(Logger).globally().to_instance(Logger())
+    configuration.bind(Database).globally().to_instance(Database())
+
+    injector = Injector(configuration)
+    wrapped_process = injector.resolve(process)
+
+    # Only user_input and debug are required (logger and db are injected)
+    result = wrapped_process("data", True)
+    assert result == "Processed: data, debug=True"
+
+    # Can use keyword arguments
+    result = wrapped_process(user_input="test", debug=False)
+    assert result == "Processed: test, debug=False"
+
+
+def test_resolve_function_with_all_injectable_params() -> None:
+    class A:
+        pass
+
+    class B:
+        pass
+
+    def func(a: A, b: B) -> str:
+        return f"{type(a).__name__}, {type(b).__name__}"
+
+    configuration = Configuration()
+    configuration.bind(A).globally()
+    configuration.bind(B).globally()
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(func)
+
+    # No parameters required
+    result = wrapped()
+    assert result == "A, B"
+
+
+def test_resolve_function_with_no_injectable_params() -> None:
+    def add(x: int, y: int) -> int:
+        return x + y
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+    wrapped = injector.resolve(add)
+
+    # All parameters still required (primitives can't be injected)
+    result = wrapped(5, 10)
+    assert result == 15
+
+
+def test_resolve_function_with_nested_dependencies() -> None:
+    class Config:
+        def get_value(self) -> str:
+            return "config_value"
+
+    class Service:
+        def __init__(self, config: Config) -> None:
+            self.config = config
+
+    def handler(service: Service, user_id: str) -> str:
+        return f"{service.config.get_value()}-{user_id}"
+
+    configuration = Configuration()
+    configuration.bind(Config).globally()
+    configuration.bind(Service).globally()
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(handler)
+
+    result = wrapped("user123")
+    assert result == "config_value-user123"
+
+
+def test_resolve_with_bound_instance() -> None:
+    class Counter:
+        def __init__(self) -> None:
+            self.count = 0
+
+        def increment(self) -> int:
+            self.count += 1
+            return self.count
+
+    def use_counter(counter: Counter) -> int:
+        return counter.increment()
+
+    configuration = Configuration()
+    counter_instance = Counter()
+    configuration.bind(Counter).globally().to_instance(counter_instance)
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(use_counter)
+
+    # All calls should use the same instance
+    assert wrapped() == 1
+    assert wrapped() == 2
+    assert wrapped() == 3
+
+
+def test_resolve_with_constructor_binding() -> None:
+    class Greeter:
+        def __init__(self, prefix: str = "Hello") -> None:
+            self.prefix = prefix
+
+        def greet(self, name: str) -> str:
+            return f"{self.prefix}, {name}"
+
+    def use_greeter(greeter: Greeter, name: str) -> str:
+        return greeter.greet(name)
+
+    def custom_greeter_builder() -> Greeter:
+        return Greeter("Greetings")
+
+    configuration = Configuration()
+    configuration.bind(Greeter).globally().to_constructor(custom_greeter_builder)
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(use_greeter)
+
+    result = wrapped("Alice")
+    assert result == "Greetings, Alice"
+
+
+def test_resolve_shared_dependencies() -> None:
+    class SharedResource:
+        def __init__(self) -> None:
+            self.id = id(self)
+
+    def func1(resource: SharedResource) -> int:
+        return resource.id
+
+    def func2(resource: SharedResource) -> int:
+        return resource.id
+
+    configuration = Configuration()
+    configuration.bind(SharedResource).globally()
+
+    injector = Injector(configuration)
+    wrapped1 = injector.resolve(func1)
+    wrapped2 = injector.resolve(func2)
+
+    # Both functions should get the same singleton instance
+    assert wrapped1() == wrapped2()
+
+
+def test_resolve_with_positional_args() -> None:
+    class Service:
+        pass
+
+    def handler(service: Service, arg1: str, arg2: int) -> str:
+        return f"{arg1}-{arg2}"
+
+    configuration = Configuration()
+    configuration.bind(Service).globally()
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(handler)
+
+    result = wrapped("test", 42)
+    assert result == "test-42"
+
+
+def test_resolve_with_keyword_args() -> None:
+    class Service:
+        pass
+
+    def handler(service: Service, arg1: str, arg2: int) -> str:
+        return f"{arg1}-{arg2}"
+
+    configuration = Configuration()
+    configuration.bind(Service).globally()
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(handler)
+
+    result = wrapped(arg1="test", arg2=42)
+    assert result == "test-42"
+
+
+def test_resolve_with_mixed_args() -> None:
+    class Service:
+        pass
+
+    def handler(service: Service, arg1: str, arg2: int, arg3: bool) -> str:
+        return f"{arg1}-{arg2}-{arg3}"
+
+    configuration = Configuration()
+    configuration.bind(Service).globally()
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(handler)
+
+    # Mix positional and keyword
+    result = wrapped("test", 42, arg3=True)
+    assert result == "test-42-True"
+
+
+def test_resolve_with_default_values() -> None:
+    class Service:
+        pass
+
+    def handler(service: Service, arg1: str = "default") -> str:
+        return arg1
+
+    configuration = Configuration()
+    configuration.bind(Service).globally()
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(handler)
+
+    # Can omit arg with default
+    result = wrapped()
+    assert result == "default"
+
+    # Can override default
+    result = wrapped("custom")
+    assert result == "custom"
+
+
+def test_resolve_primitive_param_without_binding() -> None:
+    class Service:
+        pass
+
+    def handler(service: Service, value: str) -> str:
+        return value
+
+    configuration = Configuration()
+    configuration.bind(Service).globally()
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(handler)
+
+    # Primitive parameter must be provided
+    result = wrapped("test")
+    assert result == "test"
+
+    # Missing primitive parameter should raise TypeError
+    with pytest.raises(TypeError):
+        wrapped()
+
+
+def test_resolve_untyped_param() -> None:
+    class Service:
+        pass
+
+    def handler(service: Service, untyped) -> str:  # type: ignore
+        return str(untyped)
+
+    configuration = Configuration()
+    configuration.bind(Service).globally()
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(handler)
+
+    # Untyped parameter must be provided
+    result = wrapped("value")
+    assert result == "value"
+
+
+def test_resolve_abstract_without_binding() -> None:
+    class AbstractService(ABC):
+        @abstractmethod
+        def do_something(self) -> str: ...
+
+    def handler(service: AbstractService, user_input: str) -> str:
+        return service.do_something()
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+
+    # Abstract without binding should remain as required parameter
+    wrapped = injector.resolve(handler)
+    # Since AbstractService can't be injected, it should be a required param
+    # This should raise TypeError for missing required argument
+    with pytest.raises(TypeError):
+        wrapped("test")
+
+
+def test_resolve_function_signature_preserved() -> None:
+    import inspect
+
+    class Service:
+        pass
+
+    def handler(service: Service, arg1: str, arg2: int = 42) -> str:
+        return f"{arg1}-{arg2}"
+
+    configuration = Configuration()
+    configuration.bind(Service).globally()
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(handler)
+
+    # Check signature only has non-injectable params
+    sig = inspect.signature(wrapped)
+    param_names = list(sig.parameters.keys())
+    assert param_names == ["arg1", "arg2"]
+    assert sig.parameters["arg2"].default == 42
+    assert sig.return_annotation is str
+
+
+def test_resolve_function_metadata_preserved() -> None:
+    class Service:
+        pass
+
+    def my_handler(service: Service, value: str) -> str:
+        """This is a handler function."""
+        return value
+
+    configuration = Configuration()
+    configuration.bind(Service).globally()
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(my_handler)
+
+    # Check metadata is preserved
+    assert wrapped.__name__ == "my_handler"
+    assert wrapped.__doc__ == "This is a handler function."
+
+
+def test_resolve_concurrent_calls() -> None:
+    class Resource:
+        def __init__(self) -> None:
+            time.sleep(0.01)
+            self.value = "resource"
+
+    def handler(resource: Resource, arg: str) -> str:
+        return f"{resource.value}-{arg}"
+
+    configuration = Configuration()
+    configuration.bind(Resource).globally()
+
+    injector = Injector(configuration)
+    wrapped = injector.resolve(handler)
+
+    def task(i: int) -> str:
+        return wrapped(f"arg{i}")  # type: ignore
+
+    threads = 10
+    with ThreadPoolExecutor() as executor:
+        running_tasks = [executor.submit(task, i) for i in range(threads)]
+        results = [t.result() for t in running_tasks]
+
+    # All should succeed
+    assert len(results) == threads
+    for i, result in enumerate(results):
+        assert result == f"resource-arg{i}"
+
+
+def test_resolve_circular_dependency_in_function() -> None:
+    # Use module-level classes for forward references to work
+    def handler(a: CircularDep_A) -> str:
+        return "test"
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+    wrapped = injector.resolve(handler)
+
+    # Should detect circular dependency (wrapped in InjectorInstantiationError)
+    with pytest.raises(InjectorInstantiationError) as exc_info:
+        wrapped()
+    # Verify the underlying cause is CircularDependencyError
+    assert isinstance(exc_info.value.__cause__, CircularDependencyError)
