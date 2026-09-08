@@ -8,16 +8,15 @@ T = TypeVar("T")
 
 class ErrorOnNotExplicitConfiguration(Configuration):
     def _get_default_resolver(self, cls: Type[T]) -> TypeResolver[T]:
-        raise InjectorConfigurationError(f"{cls} was not binded explicity")
+        raise InjectorConfigurationError(f"{cls} was not binded explicitly")
 
 
 class MockOnNotExplicitConfiguration(Configuration):
     def _get_default_resolver(self, cls: Type[T]) -> TypeResolver[T]:
-        print(f"generating default for {cls}")
         resolver = TypeResolver[T](cls)
         if isinstance(cls, type):
             mock = Mock(cls)
         else:
             mock = Mock()
-        resolver.to_instance(mock)
+        resolver.to_instance(mock)  # type: ignore
         return resolver

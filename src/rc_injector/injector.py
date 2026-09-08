@@ -1,4 +1,5 @@
 import inspect
+import types
 import typing
 from typing import (
     Any,
@@ -8,6 +9,7 @@ from typing import (
     List,
     NamedTuple,
     Optional,
+    Set,
     Type,
     TypeVar,
     Union,
@@ -26,6 +28,16 @@ PRIMITIVE_TYPES = {
     str,
     tuple,
 }
+
+# The PEP 604 syntax `Foo | None` builds a `types.UnionType`, while
+# `Optional[Foo]` and `Union[Foo, Bar]` build a `typing.Union`, and
+# `typing.get_origin()` reports a different origin for each of them.
+# Both flavors compare and hash equal, so they are interchangeable as
+# binding keys, but any check on the origin has to accept both.
+UNION_ORIGINS: Set[Any] = {typing.Union, typing.Optional}
+if hasattr(types, "UnionType"):
+    # PEP 604 unions are only available on Python 3.10+
+    UNION_ORIGINS.add(types.UnionType)
 
 
 class InjectorError(Exception):
@@ -175,6 +187,42 @@ class TypeResolver(Generic[T]):
             self._arg_types[k] = v
         return self
 
+    def _resolve_text_annotation(
+        self, constructor: Callable[..., Any], param: inspect.Parameter
+    ) -> Type[Any]:
+        """
+        Convert a text-based annotation into the real type it refers to.
+
+        Annotations are text when they are quoted forward references or
+        when the module uses `from __future__ import annotations`. They
+        can be plain class names ("Foo"), but also expressions such as
+        "Foo | None" (PEP 604), "Optional[Foo]" or "Union[Foo, Bar]", so
+        they are evaluated in the scope of the constructor's module.
+        """
+        constructor_context = getattr(constructor, "__globals__", None)
+        if constructor_context is None:
+            raise InjectorInstantiationError(
+                f"Unable to parse constructor signature for class {self.cls}: "
+                f"Param {param.name} has a text signature {param.annotation} "
+                "and we are unable to find the constructor globals."
+            )
+        try:
+            # Evaluated on a copy of the globals, as `eval()` would
+            # otherwise inject `__builtins__` into the real module
+            return cast(
+                Type[Any],
+                eval(param.annotation, dict(constructor_context)),  # noqa: S307
+            )
+        except Exception as e:
+            raise InjectorInstantiationError(
+                f"Unable to parse constructor signature for class {self.cls}: "
+                f"Param {param.name} has a text signature {param.annotation} "
+                f"that we are unable to evaluate: {e}. Only types reachable "
+                "from the globals of the constructor's module can be "
+                "resolved, and text PEP 604 unions like `Foo | None` need "
+                "Python 3.10+ (use `Optional[Foo]` on older versions)."
+            ) from e
+
     def _get_params(
         self, constructor: Callable[..., Any], is_init: bool = False
     ) -> List[Param]:
@@ -187,18 +235,7 @@ class TypeResolver(Generic[T]):
                 continue
             param_type: Type[Any]
             if isinstance(param.annotation, str):
-                # Text-based annotation. Convert to real class
-                candidate_param_type = constructor.__globals__.get(param.annotation)
-                if candidate_param_type is None or not isinstance(
-                    candidate_param_type, type
-                ):
-                    raise InjectorInstantiationError(
-                        f"Unable to parse constructor signature for class {self.cls}: "
-                        f"Param {param.name} has a text signature {param.annotation} "
-                        "and we are unable to find that class in globals or not a "
-                        "class."
-                    )
-                param_type = candidate_param_type
+                param_type = self._resolve_text_annotation(constructor, param)
             else:
                 param_type = param.annotation
 
@@ -206,6 +243,15 @@ class TypeResolver(Generic[T]):
                 Param(name=param.name, type=param_type, default=param.default)
             )
         return params[1:] if is_init else params
+
+    def _check_cls_is_not_union(self) -> None:
+        if typing.get_origin(self.cls) in UNION_ORIGINS:
+            # Unions have multiple alternatives, so there is nothing to build
+            raise InjectorConfigurationError(
+                f"{self.cls} is a union and it can't be instantiated directly. "
+                "You need to bind it to one of its alternatives with "
+                "bind(cast(Type[Foo], Optional[Foo])).globally().to_class(Foo)"
+            )
 
     def _check_cls_is_not_abstract(self) -> None:
         if inspect.isabstract(self.cls):
@@ -264,7 +310,7 @@ class TypeResolver(Generic[T]):
         if not is_binded:
             # Checks only for non-binded param.type
             origin_cls = typing.get_origin(param.type)
-            if origin_cls in (typing.Union, typing.Optional):
+            if origin_cls in UNION_ORIGINS:
                 raise InjectorConfigurationError(
                     constructor_error_context()
                     + f"Unable to determine how to inject param `{param.name}` "
@@ -323,6 +369,7 @@ class TypeResolver(Generic[T]):
             params = self._get_params(constructor)
         else:
             # No overrides, we will build the class itself
+            self._check_cls_is_not_union()
             self._check_cls_is_not_abstract()
             self._check_cls_is_not_protocol()
             self._check_cls_is_not_newtype()
