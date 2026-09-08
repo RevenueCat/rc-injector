@@ -33,3 +33,14 @@ jobs:
       - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
       - name: Tests
         run: uv run --with nox -m nox -s tests
+
+  tests-prerelease:
+    name: Run tests on the upcoming Python
+    runs-on: ubuntu-latest
+    # A pre-release can break on its own, so it does not block a merge
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
+      - name: Tests
+        run: uv run --with nox -m nox -s tests_prerelease

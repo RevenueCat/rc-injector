@@ -3,7 +3,7 @@ name = "rc-injector"
 version = "0.0.3"
 description = "Python dependency injector"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Guillermo Perez", email = "bisho@revenuecat.com" }]
@@ -12,12 +12,12 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading :: 3 - Stable",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
@@ -73,8 +73,10 @@ select = ["B", "C4", "E", "F", "I", "PIE", "RUF", "S", "SIM", "UP", "W"]
 combine-as-imports = true
 
 [tool.ruff.lint.per-file-ignores]
-# Tests are meant to assert, and to reach into private helpers
-"tests/*.py" = ["S101"]
+# Tests are meant to assert, and to reach into private helpers. They
+# also spell unions as `Optional[Foo]` and `Union[Foo, Bar]` on purpose,
+# as the injector supports those alongside the `Foo | None` syntax
+"tests/*.py" = ["S101", "UP007", "UP045"]
 
 [tool.uv]
 reinstall-package = ["rc-injector"]
