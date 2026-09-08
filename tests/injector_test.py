@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
 import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
-from typing import Generic, NewType, Optional, Protocol, Type, TypeVar, Union, cast
+from typing import Generic, NewType, Optional, Protocol, TypeVar, Union, cast
 from unittest.mock import Mock
 
 import pytest
@@ -70,7 +69,7 @@ def test_default_values() -> None:
         def __init__(self, a: A = default_a) -> None:
             self.a = a
 
-    # unless specifically binded, it will use default
+    # unless specifically bound, it will use default
     configuration = Configuration()
     injector = Injector(configuration)
     # Builds the right class
@@ -78,7 +77,7 @@ def test_default_values() -> None:
     assert id(injector.get(B).a) != id(injected_a)
     assert id(injector.get(B).a) == id(default_a)
 
-    # If binded, it is overriden
+    # If bound, it is overridden
     configuration = Configuration()
     configuration.bind(A).globally()
     injector = Injector(configuration)
@@ -390,8 +389,8 @@ def test_optional_and_union_types() -> None:
     configuration = Configuration()
     # To bind Optional and Union you will need to cast
     # the complex type to make strict type-check happy
-    configuration.bind(cast(Type[A], Optional[A])).globally().to_class(A)
-    configuration.bind(cast(Type[A], Union[A, B])).globally().to_class(A)
+    configuration.bind(cast(type[A], Optional[A])).globally().to_class(A)
+    configuration.bind(cast(type[A], Union[A, B])).globally().to_class(A)
     injector = Injector(configuration)
     assert isinstance(injector.get(B).a, A)
     assert isinstance(injector.get(C).a_or_b, A)
@@ -439,7 +438,7 @@ def test_bind_new_type_and_type_alias() -> None:
 
     configuration = Configuration()
     configuration.bind(AOrB).globally().to_class(A)
-    configuration.bind(cast(Type[B], BOrA)).globally().to_class(B)
+    configuration.bind(cast(type[B], BOrA)).globally().to_class(B)
     injector = Injector(configuration)
     assert isinstance(injector.get(UsesNewType).a_or_b, A)
     assert isinstance(injector.get(UsesAlias).b_or_a, B)
@@ -506,7 +505,7 @@ def test_generics_instances() -> None:
     # We are binding to generic container, so strict type-check
     # will complaint about the instance provided being incompatible
     # Container[str]. Casting it will make type-check happy.
-    configuration.bind(cast(Type[Container[str]], Container)).globally().to_instance(
+    configuration.bind(cast(type[Container[str]], Container)).globally().to_instance(
         str_container
     )
     configuration.bind(Container[int]).for_parent(NeedsIntContainer).to_instance(

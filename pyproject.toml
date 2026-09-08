@@ -1,22 +1,51 @@
 [project]
-dependencies = []
-authors = [{ name = "Guillermo Perez", email = "bisho@revenuecat.com" }]
-license = { text = "MIT License" }
 name = "rc-injector"
 version = "0.0.3"
 description = "Python dependency injector"
 readme = "README.md"
 requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Guillermo Perez", email = "bisho@revenuecat.com" }]
+dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 
 [project.urls]
 homepage = "https://github.com/RevenueCat/rc-injector"
 
-[tool.poetry.dependencies]
-python = "^3.8"
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rc_injector = ["py.typed"]
 
 [tool.pytest.ini_options]
-addopts = "-ra"
+addopts = "-ra --strict-markers"
 testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+implicit_reexport = true
+
+[[tool.mypy.overrides]]
+module = ["nox.*"]
+ignore_missing_imports = true
 
 [tool.coverage.paths]
 source = ["src", "*/site-packages"]
@@ -32,8 +61,24 @@ fail_under = 85
 [tool.ruff]
 line-length = 88
 
-[tool.uv]
-reinstall-package = ["rc-injector"]
+[tool.ruff.lint]
+# Selected explicitly, so a new ruff release can't enable rules on its own.
+# Roughly the flake8 selection this project used before moving to ruff
+# (bugbear, comprehensions, pycodestyle, pyflakes, isort, bandit) plus
+# pyupgrade, flake8-simplify and the ruff-specific checks.
+select = ["B", "C4", "E", "F", "I", "PIE", "RUF", "S", "SIM", "UP", "W"]
+
+[tool.ruff.lint.isort]
+# Keep the explicit `X as X` re-exports of __init__.py on a single block
+combine-as-imports = true
 
 [tool.ruff.lint.per-file-ignores]
-# "tests/*.py" = ["E731"]
+# Tests are meant to assert, and to reach into private helpers
+"tests/*.py" = ["S101"]
+
+[tool.uv]
+reinstall-package = ["rc-injector"]
+# Ignore releases younger than a week, to avoid picking up a
+# freshly published (or freshly compromised) version. Serialized
+# into uv.lock as `exclude-newer-span`.
+exclude-newer = "P7D"
