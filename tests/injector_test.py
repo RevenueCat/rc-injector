@@ -1,7 +1,19 @@
+import collections
 import time
+import typing
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
-from typing import Generic, NewType, Optional, Protocol, TypeVar, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Generic,
+    NewType,
+    Optional,
+    Protocol,
+    TypeVar,
+    Union,
+    cast,
+)
 from unittest.mock import Mock
 
 import pytest
@@ -85,6 +97,18 @@ def test_default_values() -> None:
     injected_a = injector.get(A)
     assert id(injector.get(B).a) == id(injected_a)
     assert id(injector.get(B).a) != id(default_a)
+
+    class C:
+        def __init__(self, a: A) -> None:
+            self.a = a
+
+    # A binding scoped to another parent is not a binding for this
+    # one, so the default is kept
+    configuration = Configuration()
+    configuration.bind(A).for_parent(C)
+    injector = Injector(configuration)
+    assert id(injector.get(B).a) == id(default_a)
+    assert id(injector.get(C).a) != id(default_a)
 
 
 def test_bind_primitive_type_fails() -> None:
@@ -292,6 +316,28 @@ def test_circular_dependency() -> None:
     with pytest.raises(CircularDependencyError):
         injector.get(CircularDep_A)
 
+    # An already resolved instance needs nothing built, so a binding
+    # to one breaks the cycle, even for the very class being built at
+    # the root, that keeps its default instantiation
+    configuration = Configuration()
+    a_for_c = Mock()
+    configuration.bind(CircularDep_A).for_parent(CircularDep_C).to_instance(a_for_c)
+    injector = Injector(configuration)
+    assert injector.get(CircularDep_A).b.c.a is a_for_c
+
+
+def test_constructor_raising() -> None:
+    class A:
+        def __init__(self) -> None:
+            raise ValueError("boom")
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+    # The error from the constructor is wrapped, and kept as the cause
+    with pytest.raises(InjectorInstantiationError, match="Constructor raised") as e:
+        injector.get(A)
+    assert isinstance(e.value.__cause__, ValueError)
+
 
 def test_primitive_param() -> None:
     class A:
@@ -300,7 +346,8 @@ def test_primitive_param() -> None:
 
     configuration = Configuration()
     injector = Injector(configuration)
-    with pytest.raises(InjectorConfigurationError):
+    # The error has to name the param that can't be injected
+    with pytest.raises(InjectorConfigurationError, match="param `foo` is a primitive"):
         injector.get(A)
 
     configuration = Configuration()
@@ -310,10 +357,196 @@ def test_primitive_param() -> None:
     assert injector.get(A).foo == "bar"
 
 
+def test_untyped_param() -> None:
+    class A:
+        def __init__(self, foo) -> None:  # type: ignore[no-untyped-def]
+            self.foo = foo
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+    # The error has to name the param, not dump the whole signature
+    with pytest.raises(InjectorConfigurationError, match="param `foo` is not typed"):
+        injector.get(A)
+
+
+def test_parameterized_primitive_params() -> None:
+    class A:
+        pass
+
+    class NeedsList:
+        def __init__(self, x: list[str]) -> None:
+            self.x = x
+
+    class NeedsTypingList:
+        # The pre-PEP 585 spelling has to be recognized too
+        def __init__(self, x: typing.List[str]) -> None:  # noqa: UP006
+            self.x = x
+
+    class NeedsDict:
+        def __init__(self, x: dict[str, A]) -> None:
+            self.x = x
+
+    class NeedsBool:
+        def __init__(self, flag: bool) -> None:
+            self.flag = flag
+
+    # A parameterized primitive is a value as much as a plain one, so it
+    # can't be injected: it used to be built as an empty `list()`/`dict()`
+    configuration = Configuration()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError, match="param `x` is a primitive"):
+        injector.get(NeedsList)
+    with pytest.raises(InjectorConfigurationError, match="param `x` is a primitive"):
+        injector.get(NeedsTypingList)
+    with pytest.raises(InjectorConfigurationError, match="param `x` is a primitive"):
+        injector.get(NeedsDict)
+    # `bool` was missing from the primitive types, so it was injected False
+    with pytest.raises(InjectorConfigurationError, match="param `flag` is a primitive"):
+        injector.get(NeedsBool)
+
+    # The value has to be provided, as for any other primitive
+    configuration = Configuration()
+    configuration.bind(NeedsList).globally().with_kwargs(x=["foo"])
+    configuration.bind(NeedsBool).globally().with_kwargs(flag=True)
+    injector = Injector(configuration)
+    assert injector.get(NeedsList).x == ["foo"]
+    assert injector.get(NeedsBool).flag is True
+
+    # Unlike plain primitives, the parameterized ones can be bound, as
+    # they are specific enough to identify what has to be injected
+    configuration = Configuration()
+    configuration.bind(cast(type[Any], list[str])).globally().to_instance(["bar"])
+    injector = Injector(configuration)
+    assert injector.get(NeedsList).x == ["bar"]
+
+
+def test_container_params_are_not_injected() -> None:
+    class Foo:
+        pass
+
+    class NeedsListOfFoo:
+        def __init__(self, foos: list[Foo]) -> None:
+            self.foos = foos
+
+    class NeedsDeque:
+        def __init__(self, x: collections.deque[Foo]) -> None:
+            self.x = x
+
+    class NeedsCounter:
+        def __init__(self, x: collections.Counter[str]) -> None:
+            self.x = x
+
+    class NeedsSequence:
+        def __init__(self, x: typing.Sequence[Foo]) -> None:
+            self.x = x
+
+    class NeedsIterable:
+        def __init__(self, x: typing.Iterable[Foo]) -> None:
+            self.x = x
+
+    class NeedsCallable:
+        def __init__(self, x: Callable[[int], str]) -> None:
+            self.x = x
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+    # `Foo` on its own is injectable, but a container of it is a value:
+    # the injector will not build `[injected_foo]` out of thin air
+    assert isinstance(injector.get(Foo), Foo)
+    with pytest.raises(InjectorConfigurationError, match="`foos` is a primitive or"):
+        injector.get(NeedsListOfFoo)
+    # The rest of the `collections` family too. These can be built with
+    # no arguments, so they used to be injected silently empty
+    with pytest.raises(InjectorConfigurationError, match="`x` is a primitive or"):
+        injector.get(NeedsDeque)
+    with pytest.raises(InjectorConfigurationError, match="`x` is a primitive or"):
+        injector.get(NeedsCounter)
+    # And its abstract interfaces, which have nothing to build either
+    with pytest.raises(InjectorConfigurationError, match="`x` is a primitive or"):
+        injector.get(NeedsSequence)
+    with pytest.raises(InjectorConfigurationError, match="`x` is a primitive or"):
+        injector.get(NeedsIterable)
+    # Including the ones that are not containers at all
+    with pytest.raises(InjectorConfigurationError, match="`x` is a primitive or"):
+        injector.get(NeedsCallable)
+
+
+def test_container_param_with_default_value() -> None:
+    class Foo:
+        pass
+
+    def default_handler(value: int) -> str:
+        return str(value)
+
+    class A:
+        def __init__(
+            self,
+            foos: tuple[Foo, ...] = (),
+            handler: Callable[[int], str] = default_handler,
+        ) -> None:
+            self.foos = foos
+            self.handler = handler
+
+    # A default in the signature is used, as for any other param, so
+    # only a mandatory param of a value type fails to resolve
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert injector.get(A).foos == ()
+    assert injector.get(A).handler(1) == "1"
+
+    configuration = Configuration()
+    configuration.bind(A).globally().with_kwargs(foos=(Foo(),))
+    injector = Injector(configuration)
+    assert len(injector.get(A).foos) == 1
+
+
+def test_own_container_class_is_still_injected() -> None:
+    class Foo:
+        pass
+
+    # Only the stdlib containers are values. A container of your own is
+    # a dependency like any other class, even if it is iterable
+    class Registry:
+        def __init__(self) -> None:
+            self.items: list[Foo] = []
+
+        def __iter__(self) -> typing.Iterator[Foo]:
+            return iter(self.items)
+
+        def __len__(self) -> int:
+            return len(self.items)
+
+    class NeedsRegistry:
+        def __init__(self, registry: Registry) -> None:
+            self.registry = registry
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert isinstance(injector.get(NeedsRegistry).registry, Registry)
+
+
 def test_primitive_param_with_default_value() -> None:
     class A:
         def __init__(self, foo: str = "default") -> None:
             self.foo = foo
+
+    class Falsy:
+        # A falsy default is a default all the same
+        def __init__(self, flag: bool = False, count: int = 0, name: str = "") -> None:
+            self.flag = flag
+            self.count = count
+            self.name = name
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert injector.get(Falsy).flag is False
+    assert injector.get(Falsy).count == 0
+    assert injector.get(Falsy).name == ""
+
+    configuration = Configuration()
+    configuration.bind(Falsy).globally().with_kwargs(flag=True)
+    injector = Injector(configuration)
+    assert injector.get(Falsy).flag is True
 
     configuration = Configuration()
     injector = Injector(configuration)
@@ -354,6 +587,153 @@ def test_global_and_parent_binding() -> None:
     assert injector.get(A).foo == "global"
     assert injector.get(B).a.foo == "for_B"
     assert injector.get(C).a.foo == "for_C"
+
+
+def test_parent_binding_only() -> None:
+    class Foo:
+        def __init__(self, tag: str = "default") -> None:
+            self.tag = tag
+
+    class Bar:
+        def __init__(self, foo: Foo) -> None:
+            self.foo = foo
+
+    class Baz:
+        def __init__(self, foo: Foo) -> None:
+            self.foo = foo
+
+    # A binding scoped to a parent only takes effect for it. Everyone
+    # else keeps the default instantiation, with no global binding
+    # needed to restore it
+    configuration = Configuration()
+    configuration.bind(Foo).for_parent(Bar).with_kwargs(tag="for_bar")
+    injector = Injector(configuration)
+    assert injector.get(Bar).foo.tag == "for_bar"
+    assert injector.get(Baz).foo.tag == "default"
+    assert injector.get(Foo).tag == "default"
+    # The default is the same singleton wherever it is injected
+    assert injector.get(Baz).foo is injector.get(Foo)
+    assert injector.get(Bar).foo is not injector.get(Foo)
+
+    # It is the default instantiation proper, the one the test
+    # configurations hook: for them, a binding scoped to another
+    # parent is not an explicit binding
+    configuration = ErrorOnNotExplicitConfiguration()
+    configuration.bind(Foo).for_parent(Bar).with_kwargs(tag="for_bar")
+    configuration.bind(Bar).globally()
+    configuration.bind(Baz).globally()
+    injector = Injector(configuration)
+    assert injector.get(Bar).foo.tag == "for_bar"
+    with pytest.raises(InjectorConfigurationError, match="not bound explicitly"):
+        injector.get(Baz)
+
+
+def test_get_with_parent_cls() -> None:
+    class A:
+        def __init__(self, foo: str = "?") -> None:
+            self.foo = foo
+
+    class B:
+        pass
+
+    # The `parent_cls` param of `get()` selects the bindings scoped to
+    # it, both when the instance has to be built and when it is cached
+    configuration = Configuration()
+    configuration.bind(A).globally().with_kwargs(foo="global")
+    configuration.bind(A).for_parent(B).with_kwargs(foo="for_B")
+    injector = Injector(configuration)
+    assert injector.get(A, parent_cls=B).foo == "for_B"
+    assert injector.get(A).foo == "global"
+    assert injector.get(A, parent_cls=B).foo == "for_B"
+    assert id(injector.get(A, parent_cls=B)) == id(injector.get(A, parent_cls=B))
+    assert id(injector.get(A, parent_cls=B)) != id(injector.get(A))
+
+    class C:
+        def __init__(self, a: A) -> None:
+            self.a = a
+
+    # The parent only applies to what is asked for, it does not leak
+    # into its dependencies: those are scoped to what is being built
+    configuration = Configuration()
+    configuration.bind(A).globally().with_kwargs(foo="global")
+    configuration.bind(A).for_parent(B).with_kwargs(foo="for_B")
+    injector = Injector(configuration)
+    assert injector.get(C, parent_cls=B).a.foo == "global"
+
+    # The parent is not being built, it only selects the bindings, so
+    # asking for a class on behalf of itself is not a cycle: it gets
+    # the bindings scoped to itself
+    configuration = Configuration()
+    configuration.bind(A).globally().with_kwargs(foo="global")
+    configuration.bind(A).for_parent(A).with_kwargs(foo="for_A")
+    injector = Injector(configuration)
+    assert injector.get(A, parent_cls=A).foo == "for_A"
+
+
+def test_get_with_parent_cls_needing_the_parent() -> None:
+    class Bus:
+        def __init__(self, injector: Injector) -> None:
+            self.injector = injector
+
+        def handler(self) -> "Handler":
+            # Resolved on its own behalf, to get the bindings scoped to it
+            return self.injector.get(Handler, parent_cls=Bus)
+
+    class Handler:
+        def __init__(self, bus: Bus, retries: int = 1) -> None:
+            self.bus = bus
+            self.retries = retries
+
+    # A class resolving its dependencies on its own behalf is already
+    # built when it asks, so a dependency needing it back is not a
+    # cycle: it gets the instance the class is bound to...
+    configuration = Configuration()
+    configuration.bind(Handler).for_parent(Bus).with_kwargs(retries=5)
+    injector = Injector(configuration)
+    bus = Bus(injector)
+    configuration.bind(Bus).globally().to_instance(bus)
+    handler = bus.handler()
+    assert handler.bus is bus
+    assert handler.retries == 5
+
+    # ...or the singleton the injector built for it
+    configuration = Configuration()
+    configuration.bind(Handler).for_parent(Bus).with_kwargs(retries=5)
+    injector = Injector(configuration)
+    configuration.bind(Injector).globally().to_instance(injector)
+    bus = injector.get(Bus)
+    handler = bus.handler()
+    assert handler.bus is bus
+    assert handler.retries == 5
+
+
+def test_falsy_instances() -> None:
+    class Flag:
+        def __init__(self, name: str = "?", on: bool = True) -> None:
+            self.name = name
+            self.on = on
+
+        def __bool__(self) -> bool:
+            return self.on
+
+    class B:
+        pass
+
+    # A falsy instance is cached and returned as any other
+    configuration = Configuration()
+    configuration.bind(Flag).globally().with_kwargs(on=False)
+    injector = Injector(configuration)
+    assert injector.get(Flag).on is False
+    assert id(injector.get(Flag)) == id(injector.get(Flag))
+
+    # And being falsy does not make the scoped binding fall back to
+    # the global one
+    configuration = Configuration()
+    configuration.bind(Flag).globally().to_instance(Flag("global", on=True))
+    configuration.bind(Flag).for_parent(B).to_instance(Flag("scoped", on=False))
+    injector = Injector(configuration)
+    assert injector.get(Flag, parent_cls=B).name == "scoped"
+    assert injector.get(Flag).name == "global"
 
 
 def test_optional_and_union_types() -> None:
@@ -431,7 +811,9 @@ def test_bind_new_type_and_type_alias() -> None:
     configuration = Configuration()
     configuration.bind(A).globally()
     injector = Injector(configuration)
-    with pytest.raises(InjectorConfigurationError):
+    with pytest.raises(
+        InjectorConfigurationError, match="`a_or_b` because it is a NewType"
+    ):
         injector.get(UsesNewType)
     with pytest.raises(InjectorConfigurationError):
         injector.get(UsesAlias)
@@ -517,10 +899,12 @@ def test_generics_instances() -> None:
     # The bind on Container[int] for parent NeedsIntContainer
     # was properly fed the int_container
     assert injector.get(NeedsIntContainer).a.value == 1
-    # Since Container requires and argument and there
-    # is no global binding for Container[int], this
-    # will fail
-    with pytest.raises(InjectorInstantiationError):
+    # With no binding for it, Container[int] gets the default
+    # instantiation, that has nothing standing in for the TypeVar
+    # of its `value: T` param
+    with pytest.raises(
+        InjectorConfigurationError, match="param `value` because it is a TypeVar"
+    ):
         injector.get(AlsoNeedsIntContainer)
 
 
