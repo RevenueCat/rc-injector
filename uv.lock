@@ -8,5 +8,5 @@ exclude-newer-span = "P7D"
 
 [[package]]
 name = "rc-injector"
-version = "0.0.3"
+version = "0.1.0"
 source = { editable = "." }
