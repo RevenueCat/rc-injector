@@ -346,6 +346,7 @@ def test_global_and_parent_binding() -> None:
     injector = Injector(configuration)
     assert injector.get(B).a.foo == "global"
     assert injector.get(C).a.foo == "global"
+    assert id(injector.get(B).a) == id(injector.get(C).a)
 
     configuration = Configuration()
     configuration.bind(A).globally().with_kwargs(foo="global")
@@ -409,6 +410,178 @@ def test_optional_and_union_types() -> None:
     injector = Injector(configuration)
     assert injector.get(B).a is None
     assert isinstance(injector.get(C).a_or_b, B)
+
+
+def test_pep604_optional_and_union_types() -> None:
+    class A:
+        pass
+
+    class B:
+        def __init__(self, a: A | None) -> None:
+            self.a = a
+
+    class C:
+        def __init__(self, a_or_b: A | B) -> None:
+            self.a_or_b = a_or_b
+
+    # If not binded, it will fail
+    configuration = Configuration()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(B)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(C)
+
+    # Just binding the classes, will fail
+    configuration = Configuration()
+    configuration.bind(A).globally()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(B)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(C)
+
+    # Binding the union without saying what to build will fail too,
+    # as there is nothing to instantiate for a union
+    configuration = Configuration()
+    configuration.bind(cast(Type[A], A | None)).globally()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(B)
+
+    # Explicitly binding the unions works
+    configuration = Configuration()
+    # To bind unions you will need to cast
+    # the complex type to make strict type-check happy
+    configuration.bind(cast(Type[A], A | None)).globally().to_class(A)
+    configuration.bind(cast(Type[A], A | B)).globally().to_class(A)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(B).a, A)
+    assert isinstance(injector.get(C).a_or_b, A)
+
+    configuration = Configuration()
+    configuration.bind(B).globally().with_arg_types(a=A)
+    configuration.bind(C).globally().with_arg_types(a_or_b=B)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(B).a, A)
+    assert isinstance(injector.get(C).a_or_b, B)
+
+    configuration = Configuration()
+    configuration.bind(B).globally().with_kwargs(a=None)
+    configuration.bind(C).globally().with_kwargs(a_or_b=B(A()))
+    injector = Injector(configuration)
+    assert injector.get(B).a is None
+    assert isinstance(injector.get(C).a_or_b, B)
+
+
+def test_pep604_and_typing_unions_are_interchangeable() -> None:
+    class A:
+        pass
+
+    class UsesPep604:
+        def __init__(self, a: A | None) -> None:
+            self.a = a
+
+    class UsesOptional:
+        def __init__(self, a: Optional[A]) -> None:
+            self.a = a
+
+    # `A | None` and `Optional[A]` are the very same type, so a
+    # binding made with either syntax resolves both constructors
+    configuration = Configuration()
+    configuration.bind(cast(Type[A], Optional[A])).globally().to_class(A)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(UsesPep604).a, A)
+    assert isinstance(injector.get(UsesOptional).a, A)
+
+    configuration = Configuration()
+    configuration.bind(cast(Type[A], A | None)).globally().to_class(A)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(UsesPep604).a, A)
+    assert isinstance(injector.get(UsesOptional).a, A)
+
+
+# Text-based annotations, either quoted forward references or the ones
+# produced by `from __future__ import annotations`, can only be resolved
+# for types reachable from the globals of the constructor's module
+class TextAnnotation_Dep:
+    pass
+
+
+class TextAnnotation_OtherDep:
+    pass
+
+
+class TextAnnotation_UsesClass:
+    def __init__(self, dep: "TextAnnotation_Dep") -> None:
+        self.dep = dep
+
+
+class TextAnnotation_UsesPep604:
+    def __init__(self, dep: "TextAnnotation_Dep | None") -> None:
+        self.dep = dep
+
+
+class TextAnnotation_UsesOptional:
+    def __init__(self, dep: "Optional[TextAnnotation_Dep]") -> None:
+        self.dep = dep
+
+
+class TextAnnotation_UsesUnion:
+    def __init__(
+        self, dep: "Union[TextAnnotation_Dep, TextAnnotation_OtherDep]"
+    ) -> None:
+        self.dep = dep
+
+
+def test_text_based_annotations() -> None:
+    # Plain classes are injected as usual
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert isinstance(injector.get(TextAnnotation_UsesClass).dep, TextAnnotation_Dep)
+
+    # Unions are recognized, so they will fail unless binded
+    configuration = Configuration()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(TextAnnotation_UsesPep604)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(TextAnnotation_UsesOptional)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(TextAnnotation_UsesUnion)
+
+    # And binding them works. Note that a single binding covers both
+    # the PEP 604 and the `Optional` spellings of the same union
+    configuration = Configuration()
+    configuration.bind(
+        cast(Type[TextAnnotation_Dep], TextAnnotation_Dep | None)
+    ).globally().to_class(TextAnnotation_Dep)
+    configuration.bind(
+        cast(
+            Type[TextAnnotation_Dep],
+            Union[TextAnnotation_Dep, TextAnnotation_OtherDep],
+        )
+    ).globally().to_class(TextAnnotation_OtherDep)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(TextAnnotation_UsesPep604).dep, TextAnnotation_Dep)
+    assert isinstance(injector.get(TextAnnotation_UsesOptional).dep, TextAnnotation_Dep)
+    assert isinstance(
+        injector.get(TextAnnotation_UsesUnion).dep, TextAnnotation_OtherDep
+    )
+
+
+def test_text_based_annotation_out_of_global_scope_fails() -> None:
+    class LocalDep:
+        pass
+
+    class UsesLocalDep:
+        def __init__(self, dep: "LocalDep | None") -> None:
+            self.dep = dep
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorInstantiationError):
+        injector.get(UsesLocalDep)
 
 
 def test_bind_new_type_and_type_alias() -> None:

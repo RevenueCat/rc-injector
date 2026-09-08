@@ -222,6 +222,20 @@ The injector will refuse to build `Optional` and `Union` types by default, as it
 
 For `Optional[Foo]` and `Union[Foo, Bar]` types binding just `Foo` will not work. You can `bind(Optional[Foo])` and `bind[Foo, Bar]` and map them normally to a instance, concrete class or constructor.
 
+The PEP 604 syntax is supported as well: `Foo | None` and `Foo | Bar` behave exactly like `Optional[Foo]` and `Union[Foo, Bar]`. Both spellings build the very same type, so a single binding resolves either of them:
+
+```python:
+class Baz:
+    def __init__(self, foo: Foo | None) -> None:
+        ...
+
+# Both of these bindings resolve the `foo` param above:
+configuration.bind(cast(Type[Foo], Foo | None)).globally().to_class(Foo)
+configuration.bind(cast(Type[Foo], Optional[Foo])).globally().to_class(Foo)
+```
+
+Note that `Foo | None` requires Python 3.10+, even when the annotation is quoted or the module uses `from __future__ import annotations`, as the injector has to evaluate the annotation at runtime to resolve the dependency. On Python 3.9 use `Optional[Foo]` instead.
+
 ## Best practices
 * Keep configuration settings out of your application-level classes' constructors, so more of them can be built automatically. You can use a `ConfigurationProvider` dependency to provide configuration settings to your app.
 * Avoid Union for dependencies when possible, use Protocol or Abstract as they should have compatible apis.

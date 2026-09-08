@@ -16,16 +16,14 @@ nox.options.default_venv_backend = "uv|virtualenv"
 def format(session: Session) -> None:
     """Format code using ruff."""
     args = session.posargs or locations
-    session.install("ruff", ".")
-    session.run("ruff", "format", "--diff", *args)
+    session.run("uvx", "ruff", "format", "--diff", *args, external=True)
 
 
 @session(python=DEFAULT_VERSION)
 def lint(session: Session) -> None:
     """Lint using flake8."""
     args = session.posargs or locations
-    session.install("ruff", ".")
-    session.run("ruff", "check", *args)
+    session.run("uvx", "ruff", "check", *args, external=True)
 
 
 @session(python=DEFAULT_VERSION)
