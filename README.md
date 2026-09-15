@@ -7,12 +7,13 @@ Python dependency injector.
 ```
 pip install rc-injector
 ```
+Requires Python 3.9 or newer.
 ## Example usage:
 Suppose you have your app with blueprints, and the blueprints can use a bunch of helpers like ConfigurationProvider, CacheClient, DBClient, Events, Jobs...
 
 If you want to use dependency injection, you will have:
 
-```python:
+```python
 class App:
     def __init__(self, foo: FooBluePrint, bar: BarBluePrint) -> None:
         self.foo = foo
@@ -34,7 +35,7 @@ This architecture is great, but is cumbersome to use, because building the whole
 
 With rc-injector, this can be as simple as:
 
-```python:
+```python
 from rc_injector import Configuration, Injector
 
 configuration = Configuration()
@@ -47,10 +48,10 @@ The injector can figure out how to build the dependency tree from the type hints
 
 Of course, this only works with classes that do not require configuration. It will more likely configure a few of the low level dependencies that need to be configured. For example:
 
-```python:
+```python
 from rc_injector import Configuration, Injector
 
-prod_configuration_manager = ConfiguratioManager(...)
+prod_configuration_manager = ConfigurationManager(...)
 
 def build_prod_db_client() -> DBClient:
     ...
@@ -71,14 +72,14 @@ injector.get(App)
 ```
 
 A few observations:
-1. We use `to_instance` to bind `ConfigurationProvider` to an specific instance that will act as singleton.
+1. We use `to_instance` to bind `ConfigurationProvider` to a specific instance that will act as singleton.
 2. `to_constructor` helps us use a function helper to build the instance. Note that the instance will still behave as singleton, the functions will not be called for each usage.
 3. `with_kwargs` allows us to define the value of some of the parameters of the class. This `CacheClient` might have a signature `__init__(self, cfg: ConfigurationProvider, pool: str)`. The `cfg` variable can be injected, but pool is a scalar so needs to be set to a particular value.
 4. We use `to_class` to bind `Events` that is an abstract class with the interface to `KafkaEvents` that implements it using Kafka. We also define the queue name to use using `with_kwargs` to override the `queue` param.
 
 Now imagine that `FooBluePrint` from the example now needs `CacheClient` due to some new features. You would just modify the signature with the new dependency:
 
-```patch:
+```patch
 class FooBluePrint(BluePrint):
 -    def __init__(self, db: DBClient) -> None:
 +    def __init__(self, db: DBClient, cache: CacheClient) -> None:
@@ -90,7 +91,7 @@ Furthermore, tests will also use an injector. Integration tests might bind the r
 
 Now imagine it's time for a refactor, we are going to split `FooBluePrint` into a few components and also use `Events`. Again, as long as there are no new low-level classes that require configuration, no changes to the injection are needed!
 
-```patch:
+```patch
 +class FooDataAccess:
 +    def __init__(self, db: DBClient, cache: CacheClient) -> None:
 +        ...
@@ -106,7 +107,7 @@ class FooBluePrint(BluePrint):
 
 The cache pool usage is growing. `FooDataAccess` caches a lot of data and items are being evicted, causing a drop in hit rate. We want to move `FooDataAccess` cache to the best-effort pool. This is a configuration change, should not require complex changes to our application, and yeah, injector can help:
 
-```patch:
+```patch
 configuration.bind(CacheClient).globally().with_kwargs(pool=CachePools.DEFAULT)
 + configuration.bind(CacheClient).for_parent(FooDataAccess).with_kwargs(pool=CachePools.BEST_EFFORT)
 ```
@@ -116,7 +117,7 @@ The bindings and behavior of the injector are controlled with the `Configuration
 
 ### Initialize
 To initialize the injector, a config is needed:
-```python:
+```python
 configuration = Configuration()
 injector = Injector(configuration)
 ```
@@ -124,7 +125,7 @@ injector = Injector(configuration)
 ### Global bindings:
 Bind the given class to the configured type resolver.
 
-```python:
+```python
 configuration.bind(Foo).globally()
 ```
 
@@ -133,7 +134,7 @@ This returns a `TypeResolver[Foo]`, that can be further configured. See `TypeRes
 ### Scoped bindings:
 Bind the given class to the configured type resolver only for the given parent class.
 
-```python:
+```python
 
 class Bar:
     def __init__(self, foo: Foo) -> None:
@@ -152,14 +153,14 @@ This returns a `TypeResolver[Foo]`, that can be further configured. See `TypeRes
 ### Type resolver
 Once created the bind and set the scope (`bind(Foo).globally()` or `bind(Foo).for_parent(Bar)`) you will get a `TypeResolver` that allows to configure how the bound value will be resolved.
 
-* `to_instance(instance)`: Binds to an specific instance. Useful for wiring globals into DI or when building the object is complicated and you prefer to control that.
-* `to_class(Bar)`: Binds to a class. Useful to inject a comparible subclass, the concrete implementation of an abstract class or a class that implements a Protocol.
+* `to_instance(instance)`: Binds to an specific instance. Useful for wiring globals into DI, or when building the object is complicated and you prefer to control that.
+* `to_class(Bar)`: Binds to a class. Useful to inject a compatible subclass, the concrete implementation of an abstract class or a class that implements a Protocol.
 * `to_constructor(constructor_fn)`: The function will build the object. Note that the function will be also injected, so the function might use a configuration class and the injector will provide it. Useful for objects complicated to build.
 * No `to_*` invoked: Binds to the class itself (it will use its `__init__()` as constructor). This makes sense, for example to control the behavior of singletons (See cache and singletons section), to revert a global bind to the original for a parent class, or for the test-specific configurations that expect explicit bindings.
 
 Additionally, for the default and `to_constructor` resolutions, this extra configuration can be set:
 * `with_kwargs(foo=bar)`: Overrides the value of given param in the constructor.
-* `with_arg_types(foo=Foo)`: Overrides the type that will be used for the param. Similar to `for_parent(...).to_class(...)` that can also override the class, but it can work when you have two args with the same type (imagine `Processor(in: Queue, out: Queue)`) and will also work for constructor functions.
+* `with_arg_types(foo=Foo)`: Overrides the type that will be used for the param. Similar to `for_parent(...).to_class(...)` that can also override the class, but it can work when you have two args with the same type (imagine `Processor(source: Queue, sink: Queue)`) and will also work for constructor functions.
 
 ### Cache and singletons
 The injector will cache **ALL** types, both specifically bound and those injected using the default. This means that **ALL classes will be singletons**.
@@ -170,14 +171,14 @@ While this is generally the preferred choice, there can be situations where this
 
 You can avoid this by:
 a) Binding for each parent class:
-```python:
+```python
 configuration.bind(Container).for_parent(Foo)
 configuration.bind(Container).for_parent(Bar)
 ```
 With this, `Foo` and `Bar` will use different containers. Note that still all `Foo` instantiated with the injector will be the same instance, and will obviously also have the same `Container`.
 
 b) Make your code build the instances by default:
-```python: 
+```python 
 class Foo:
     def __init__(self, container: Optional[Foo] = None) -> None:
         self.container = container or Container()
@@ -185,10 +186,10 @@ class Foo:
 The code is still testable, `Container` can be injected for tests (the test injector can even bind `Optional[Container]` to a mock), but it is clear that each class will use a different `Container` instance by default.
 
 ## Default values
-The injector recognizes default values and will use them unless there is an specific binding for the class.
+The injector recognizes default values and will use them unless there is a specific binding for the class.
 
 For example:
-```python:
+```python
 class A:
     def __init__(self, foo: str="foo") -> None:
         ...
@@ -196,13 +197,13 @@ class A:
 
 Will just work as expected, and the default value will be used. If you would want to override this value with the injector, you will need to use:
 
-```python:
+```python
 configuration.bind(A).globally().with_kwargs(foo="override")
 ```
 
 While having static instances as default values is not recommended, this will also work:
 
-```python:
+```python
 default_foo = Foo("static")
 class A:
     def __init__(self, foo: Foo = default_foo) -> None:
@@ -211,21 +212,21 @@ class A:
 
 By default, `A` will receive `default_foo` as parameter. To override, you will do:
 
-```python:
+```python
 configuration.bind(Foo).globally().to_instance(override_foo)
 # Or just for A:
 configuration.bind(Foo).for_parent(A).to_instance(override_foo)
 ```
 
 ## Optional and Unions
-The injector will refuse to build `Optional` and `Union` types by default, as it doesn't know what of the multiple choices to injects.
+The injector will refuse to build `Optional` and `Union` types by default, as it doesn't know which of the multiple choices to inject.
 
 For `Optional[Foo]` and `Union[Foo, Bar]` types binding just `Foo` will not work. You can `bind(Optional[Foo])` and `bind[Foo, Bar]` and map them normally to a instance, concrete class or constructor.
 
 ## Best practices
 * Keep configuration settings out of your application-level classes' constructors, so more of them can be built automatically. You can use a `ConfigurationProvider` dependency to provide configuration settings to your app.
 * Avoid Union for dependencies when possible, use Protocol or Abstract as they should have compatible apis.
-* If is ok to have low-level dependencies (data access, ...) with configuration or as abstract / Protocol classes that force injecting a concrete instance and/or configuration.
+* It is ok to have low-level dependencies (data access, ...) with configuration or as abstract / Protocol classes that force injecting a concrete instance and/or configuration.
 * Build a production entry point separated from test and local envs, that is the only one that configures the injector for production.
 * Prepare a shared test-specific injector. Specially for integration tests so the plumbing of configuring dependencies for test environment is only done once.
   
@@ -237,7 +238,7 @@ For testing it might be interesting to mock by default or fail if a dependency i
 ### ErrorOnNotExplicitConfiguration
 Will throw `ErrorOnNotExplicitConfiguration` for any class not bound.
 
-```python:
+```python
     class Dependency:
         pass
 
@@ -261,7 +262,7 @@ Will throw `ErrorOnNotExplicitConfiguration` for any class not bound.
 ### MockOnNotExplicitConfiguration
 Will mock any classes not specifically bound.
 
-```python:
+```python
     class Dependency:
         def some_method(self) -> str:
             return "PRODUCTION_VALUE"
@@ -285,7 +286,18 @@ Will mock any classes not specifically bound.
 
 Install `uv` (https://docs.astral.sh/uv/) and run:
 
-```bash:
+```bash
 uv venv
 uv run --with nox nox
+```
+
+That lints, checks formatting and types, runs the test suite on every supported
+Python version and checks that the versions on `pyproject.toml` and
+`__init__.py` match. Some handy variations:
+
+```bash
+# Apply formatting and the fixable lint findings
+uv run --with nox nox -s fix
+# Run the test suite on a single version
+uv run --with nox nox -s tests -p 3.13
 ```

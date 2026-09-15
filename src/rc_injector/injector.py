@@ -3,12 +3,9 @@ import typing
 from typing import (
     Any,
     Callable,
-    Dict,
     Generic,
-    List,
     NamedTuple,
     Optional,
-    Type,
     TypeVar,
     Union,
     cast,
@@ -47,22 +44,19 @@ class CircularDependencyError(InjectorError):
 class Abstract(Generic[T]):
     """
     Abstract classes can't be passed to functions
-    expecting Type[T] as they expect a concrete
+    expecting type[T] as they expect a concrete
     class that can be instantiated.
-    This is a hack to be able to pass a Abstract
-    Type, without mypy complaining, but still fully type safe
+    This is a hack to be able to pass an Abstract
+    Type, without mypy complaining, but still fully type safe.
     To configure an abstract class "Foo", instead of
-    passign just "Foo", pass "Abstract[Foo]()" to
-    the injector and for the configuration.
-    )
+    passing just "Foo", pass "Abstract[Foo]()" to
+    the injector and to the configuration.
     """
-
-    pass
 
 
 class Param(NamedTuple):
     name: str
-    type: Type[Any]
+    type: type[Any]
     default: Any
 
 
@@ -71,14 +65,14 @@ class TypeResolver(Generic[T]):
     Knows how to resolve a type into a concrete instance.
     """
 
-    cls: Type[T]
+    cls: type[T]
     _to_instance: Optional[T]
-    _to_class: Optional[Type[Any]]
+    _to_class: Optional[type[Any]]
     _to_constructor: Optional[Callable[..., T]]
-    _kwargs: Dict[str, Any]
-    _arg_types: Dict[str, Type[Any]]
+    _kwargs: dict[str, Any]
+    _arg_types: dict[str, type[Any]]
 
-    def __init__(self, cls: Type[T]) -> None:
+    def __init__(self, cls: type[T]) -> None:
         self.cls = cls
         self._to_instance = None
         self._to_class = None
@@ -97,11 +91,11 @@ class TypeResolver(Generic[T]):
             or self._arg_types
         ):
             raise InjectorConfigurationError(
-                f"Unable to bind {self.cls} to instance. Already binded: {self}"
+                f"Unable to bind {self.cls} to instance. Already bound: {self}"
             )
         self._to_instance = instance
 
-    def to_class(self, cls: Type[Any]) -> None:
+    def to_class(self, cls: type[Any]) -> None:
         """
         Bind it to the provided class instead of original
 
@@ -116,7 +110,7 @@ class TypeResolver(Generic[T]):
             or self._arg_types
         ):
             raise InjectorConfigurationError(
-                f"Unable to bind {self.cls} to class. Already binded: {self}"
+                f"Unable to bind {self.cls} to class. Already bound: {self}"
             )
         self._to_class = cls
 
@@ -126,7 +120,7 @@ class TypeResolver(Generic[T]):
         """
         if self._to_instance is not None or self._to_class is not None:
             raise InjectorConfigurationError(
-                f"Unable to bind {self.cls} to class. Already binded: {self}"
+                f"Unable to bind {self.cls} to class. Already bound: {self}"
             )
         self._to_constructor = constructor
         return self
@@ -141,12 +135,12 @@ class TypeResolver(Generic[T]):
         if self._to_instance is not None:
             raise InjectorConfigurationError(
                 f"Unable to define kwargs for {self.cls}: "
-                "It is binded to an specific instance"
+                "It is bound to a specific instance"
             )
         if self._to_class is not None:
             raise InjectorConfigurationError(
                 f"Unable to define kwargs for {self.cls}: "
-                f"It is binded to class {self._to_class}. "
+                f"It is bound to class {self._to_class}. "
                 "Configure kwargs for that class directly"
             )
         for k, v in kwargs.items():
@@ -155,7 +149,7 @@ class TypeResolver(Generic[T]):
 
     def with_arg_types(self, **kwargs: Any) -> "TypeResolver[T]":
         """
-        Define the type to used for the class or the constructor
+        Define the type to use for the class or the constructor
 
         Useful when a constructor has an Optional or Union and it
         is not clear what value to inject.
@@ -163,12 +157,12 @@ class TypeResolver(Generic[T]):
         if self._to_instance is not None:
             raise InjectorConfigurationError(
                 f"Unable to define arg types for {self.cls}: "
-                "It is binded to an specific instance"
+                "It is bound to a specific instance"
             )
         if self._to_class is not None:
             raise InjectorConfigurationError(
                 f"Unable to define arg types for {self.cls}: "
-                f"It is binded to class {self._to_class}. "
+                f"It is bound to class {self._to_class}. "
                 "Configure them on that class directly"
             )
         for k, v in kwargs.items():
@@ -177,15 +171,15 @@ class TypeResolver(Generic[T]):
 
     def _get_params(
         self, constructor: Callable[..., Any], is_init: bool = False
-    ) -> List[Param]:
-        params: List[Param] = []
+    ) -> list[Param]:
+        params: list[Param] = []
         for param in inspect.signature(constructor).parameters.values():
             if param.kind in (
                 inspect.Parameter.VAR_POSITIONAL,
                 inspect.Parameter.VAR_KEYWORD,
             ):
                 continue
-            param_type: Type[Any]
+            param_type: type[Any]
             if isinstance(param.annotation, str):
                 # Text-based annotation. Convert to real class
                 candidate_param_type = constructor.__globals__.get(param.annotation)
@@ -235,7 +229,7 @@ class TypeResolver(Generic[T]):
             )
 
     def _check_param_can_be_built(
-        self, constructor: Callable[..., Any], param: Param, is_binded: bool
+        self, constructor: Callable[..., Any], param: Param, is_bound: bool
     ) -> None:
         def constructor_error_context() -> str:
             if constructor == self.cls:
@@ -261,8 +255,8 @@ class TypeResolver(Generic[T]):
                 f"`{param.type}` that can't be injected. Provide the value "
                 "to use with `with_kwargs()` in the injector configuration."
             )
-        if not is_binded:
-            # Checks only for non-binded param.type
+        if not is_bound:
+            # Checks only for non-bound param.type
             origin_cls = typing.get_origin(param.type)
             if origin_cls in (typing.Union, typing.Optional):
                 raise InjectorConfigurationError(
@@ -339,16 +333,16 @@ class TypeResolver(Generic[T]):
         kwargs = dict(self._kwargs)
         for param in params:
             if param.name in kwargs:
-                # Already provider in the configuration
+                # Already provided in the configuration
                 continue
             if overriden_param_type := self._arg_types.get(param.name):
                 kwargs[param.name] = injector_context.get(overriden_param_type)
                 continue
-            is_binded = injector_context.configuration.has_configured_bindings(
+            is_bound = injector_context.configuration.has_configured_bindings(
                 param.type
             )
             has_default_value = param.default != inspect.Parameter.empty
-            if has_default_value and not is_binded:
+            if has_default_value and not is_bound:
                 # There is a default value for the param, so
                 # we will use it unless there is an specific
                 # binding for the type.
@@ -357,7 +351,7 @@ class TypeResolver(Generic[T]):
             self._check_param_can_be_built(
                 constructor=constructor,
                 param=param,
-                is_binded=is_binded,
+                is_bound=is_bound,
             )
             kwargs[param.name] = injector_context.get(param.type)
 
@@ -375,24 +369,24 @@ class TypeResolver(Generic[T]):
 class Binding(Generic[T]):
     def __init__(
         self,
-        cls: Type[T],
+        cls: type[T],
     ):
         self.cls = cls
         self.global_resolver: Optional[TypeResolver[T]] = None
-        self.scoped_resolvers: Dict[Type[Any], TypeResolver[T]] = {}
+        self.scoped_resolvers: dict[type[Any], TypeResolver[T]] = {}
 
     def globally(self) -> TypeResolver[T]:
         if self.global_resolver is None:
             self.global_resolver = TypeResolver[T](self.cls)
         return self.global_resolver
 
-    def for_parent(self, parent_cls: Type[Any]) -> TypeResolver[T]:
+    def for_parent(self, parent_cls: type[Any]) -> TypeResolver[T]:
         if parent_cls not in self.scoped_resolvers:
             self.scoped_resolvers[parent_cls] = TypeResolver[T](self.cls)
         return self.scoped_resolvers[parent_cls]
 
     def get_type_resolver(
-        self, parent_cls: Optional[Type[T]]
+        self, parent_cls: Optional[type[T]]
     ) -> Optional[TypeResolver[T]]:
         if parent_cls and parent_cls in self.scoped_resolvers:
             return self.scoped_resolvers[parent_cls]
@@ -400,31 +394,31 @@ class Binding(Generic[T]):
 
 
 class Configuration:
-    bindings: Dict[Type[Any], Binding[Any]]
-    _default_type_resolvers: Dict[Type[Any], TypeResolver[Any]]
+    bindings: dict[type[Any], Binding[Any]]
+    _default_type_resolvers: dict[type[Any], TypeResolver[Any]]
 
     def __init__(self) -> None:
         self.bindings = {}
         self._default_type_resolvers = {}
 
-    def bind(self, cls: Union[Type[T], Abstract[T]]) -> Binding[T]:
+    def bind(self, cls: Union[type[T], Abstract[T]]) -> Binding[T]:
         # Abstract is just a trick to make mypy like
         # abstract types passed into our injector
         assert not isinstance(cls, Abstract)  # noqa: S101
         if cls in PRIMITIVE_TYPES:
             raise InjectorConfigurationError(
-                "Primitive types can't be binded. If you need to inject "
-                "a specific value, use `with_kwargs()` on the partent class"
+                "Primitive types can't be bound. If you need to inject "
+                "a specific value, use `with_kwargs()` on the parent class"
             )
         if cls not in self.bindings:
             self.bindings[cls] = Binding[T](cls)
         return self.bindings[cls]
 
-    def _get_default_resolver(self, cls: Type[T]) -> TypeResolver[T]:
+    def _get_default_resolver(self, cls: type[T]) -> TypeResolver[T]:
         return TypeResolver[T](cls)
 
     def get_type_resolver(
-        self, cls: Type[T], parent_cls: Optional[Type[Any]]
+        self, cls: type[T], parent_cls: Optional[type[Any]]
     ) -> Optional[TypeResolver[T]]:
         if cls in self.bindings:
             return self.bindings[cls].get_type_resolver(parent_cls=parent_cls)
@@ -433,7 +427,7 @@ class Configuration:
                 self._default_type_resolvers[cls] = self._get_default_resolver(cls)
             return self._default_type_resolvers[cls]
 
-    def has_configured_bindings(self, cls: Union[Type[T], Abstract[T]]) -> bool:
+    def has_configured_bindings(self, cls: Union[type[T], Abstract[T]]) -> bool:
         return cls in self.bindings
 
 
@@ -445,30 +439,30 @@ class Injector:
 
     def get(
         self,
-        cls: Union[Type[T], Abstract[T]],
-        parent_cls: Optional[Type[Any]] = None,
+        cls: Union[type[T], Abstract[T]],
+        parent_cls: Optional[type[Any]] = None,
     ) -> T:
         # Abstract is just a trick to make mypy like
         # abstract types passed into our injector
         assert not isinstance(cls, Abstract)  # noqa: S101
-        if type_resolver := self._configuration.get_type_resolver(cls, parent_cls):
-            # Fast path for already cached instances, and avoid having to
-            # create a new injection context
-            if instance := type_resolver.get_cached_instance():
-                return instance
+        # Fast path for already cached instances, that avoids having
+        # to create a new injection context
+        type_resolver = self._configuration.get_type_resolver(cls, parent_cls)
+        if type_resolver and (instance := type_resolver.get_cached_instance()):
+            return instance
         # Create a new injection context and get the instance from it
         return InjectorContext(configuration=self._configuration).get(cls)
 
 
 class InjectorContext:
     configuration: Configuration
-    stack: List[Type[Any]]
+    stack: list[type[Any]]
 
     def __init__(self, configuration: Configuration) -> None:
         self.configuration: Configuration = configuration
-        self.stack: List[Type[Any]] = []
+        self.stack: list[type[Any]] = []
 
-    def get(self, cls: Type[T]) -> T:
+    def get(self, cls: type[T]) -> T:
         if cls in self.stack:
             raise CircularDependencyError(
                 f"Unable to instantiate {self.stack[0]} because {cls} "
