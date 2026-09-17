@@ -6,9 +6,15 @@ from nox import Session, session
 
 nox.options.sessions = "lint", "format", "types", "tests", "check_version"
 locations = "src", "tests", "noxfile.py"
-DEFAULT_VERSION = "3.13"
-# Every version supported by `requires-python` on pyproject.toml
-VERSIONS = ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]
+DEFAULT_VERSION = "3.14"
+# Every version supported by `requires-python` on pyproject.toml, plus
+# the free-threaded build of the newest one: an injector is shared
+# across threads, so it has to hold up with no GIL
+VERSIONS = ["3.14", "3.14t", "3.13", "3.12", "3.11", "3.10"]
+# The upcoming version, tested ahead of its release so that it is
+# supported on day one. Kept out of the default sessions, as a
+# pre-release can break on its own
+PRERELEASE_VERSIONS = ["3.15"]
 # Pinned, so a new ruff release can't turn CI red on its own
 RUFF = "ruff@0.16.5"
 INIT_FILE = Path("src/rc_injector/__init__.py")
@@ -64,9 +70,7 @@ def check_version(session: Session) -> None:
         session.error("Version mismatch!")
 
 
-@session(python=VERSIONS)
-def tests(session: Session) -> None:
-    """Run the test suite."""
+def _run_tests(session: Session) -> None:
     args = session.posargs or ["--cov"]
     session.install(
         "pytest",
@@ -74,3 +78,15 @@ def tests(session: Session) -> None:
         ".",
     )
     session.run("pytest", *args, env={"PYTHONHASHSEED": "0"})
+
+
+@session(python=VERSIONS)
+def tests(session: Session) -> None:
+    """Run the test suite."""
+    _run_tests(session)
+
+
+@session(python=PRERELEASE_VERSIONS)
+def tests_prerelease(session: Session) -> None:
+    """Run the test suite on the upcoming Python, ahead of its release."""
+    _run_tests(session)
