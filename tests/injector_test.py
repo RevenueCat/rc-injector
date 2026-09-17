@@ -1,4 +1,5 @@
 import collections
+import threading
 import time
 import typing
 from abc import ABC, abstractmethod
@@ -1584,3 +1585,67 @@ def test_concurrent_injection() -> None:
             if running_task.result():
                 ok += 1
     assert ok == threads
+
+
+def test_thread_safe_injector_builds_a_single_instance() -> None:
+    threads = 20
+
+    def distinct_instances(injector: Injector, cls: type[Any]) -> int:
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            return len(
+                {
+                    id(i)
+                    for i in executor.map(lambda _: injector.get(cls), range(threads))
+                }
+            )
+
+    # Without a lock, every thread asking while the first build is under
+    # way builds its own. Forced with a barrier that only opens once all
+    # of them are inside the constructor, so it is not left to timing
+    barrier = threading.Barrier(threads, timeout=5)
+
+    class Contended:
+        def __init__(self) -> None:
+            barrier.wait()
+
+    configuration = Configuration()
+    injector = Injector(configuration, thread_safe=False)
+    assert distinct_instances(injector, Contended) == threads
+
+    # With one, the default, the first build is the only one, and
+    # everybody shares it
+    built: list[object] = []
+
+    class Slow:
+        def __init__(self) -> None:
+            # Long enough for every other thread to ask meanwhile
+            time.sleep(0.01)
+            built.append(self)
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert distinct_instances(injector, Slow) == 1
+    assert len(built) == 1
+
+
+def test_thread_safe_injectors_share_the_lock_of_their_configuration() -> None:
+    # Two injectors over the same configuration hand out the same
+    # instances, so they have to serialize their builds against each
+    # other as well, not just each against itself
+    configuration = Configuration()
+    assert Injector(configuration)._build_lock is Injector(configuration)._build_lock
+
+
+def test_thread_safe_injector_is_reentrant() -> None:
+    class Inner:
+        pass
+
+    class Outer:
+        def __init__(self, injector: Injector) -> None:
+            # Asks the injector for more while being built by it
+            self.inner = injector.get(Inner)
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+    configuration.bind(Injector).globally().to_instance(injector)
+    assert isinstance(injector.get(Outer).inner, Inner)
