@@ -223,6 +223,15 @@ The injector will refuse to build `Optional` and `Union` types by default, as it
 
 For `Optional[Foo]` and `Union[Foo, Bar]` types binding just `Foo` will not work. You can `bind(Optional[Foo])` and `bind[Foo, Bar]` and map them normally to a instance, concrete class or constructor.
 
+## Primitives and values
+Primitive types (`str`, `int`, `bool`, `bytes`, ...) can't be injected. You have to provide the value to use with `with_kwargs()`, or give the param a default in the signature.
+
+Containers are values as well, the parameterized ones included: `list[Foo]` is never built as a list of injected `Foo`s, even though `Foo` itself is injectable. That covers the builtin containers, the whole `collections` family and every abstract interface on `collections.abc` (`Sequence[Foo]`, `Mapping[str, Foo]`, `Callable[[int], str]`, ...), as none of them has an implementation to build. A container class of your own is a dependency like any other class, so it is injected normally.
+
+Only mandatory params are checked: a param with a default value in the signature uses it, whatever its type, so `foo: bool = False` needs no configuration at all.
+
+Unlike plain primitives, a parameterized container is specific enough to be bound, so `bind(cast(type[Any], list[Foo]))` is an option too when the same list is to be injected everywhere.
+
 ## Best practices
 * Keep configuration settings out of your application-level classes' constructors, so more of them can be built automatically. You can use a `ConfigurationProvider` dependency to provide configuration settings to your app.
 * Avoid Union for dependencies when possible, use Protocol or Abstract as they should have compatible apis.

@@ -1,3 +1,4 @@
+import collections.abc
 import inspect
 import typing
 from typing import (
@@ -14,15 +15,56 @@ from typing import (
 T = TypeVar("T")
 
 PRIMITIVE_TYPES = {
+    bool,
+    bytearray,
     bytes,
+    complex,
     dict,
     float,
+    frozenset,
     int,
     list,
     set,
     str,
     tuple,
 }
+
+# Modules holding the stdlib container types. Matching by module covers
+# the whole `collections` family without listing every type, and only
+# for the stdlib: a container class of your own stays injectable, as it
+# is a dependency like any other class.
+CONTAINER_MODULES = {"builtins", "collections"}
+# Its members are all abstract interfaces, so none of them has an
+# implementation to build
+ABSTRACT_INTERFACES_MODULE = "collections.abc"
+
+
+def _is_value_type(cls: Any) -> bool:
+    """
+    Whether the annotation is a value instead of a dependency.
+
+    Values can't be injected, as there is nothing to build for them.
+    A container is a value even when its items are injectable:
+    `list[Foo]` is never built as `[injected_foo]`, the value has to
+    be provided. Note that the containers that can be built with no
+    arguments would otherwise be injected silently empty.
+
+    Only mandatory params are checked against this: one with a default
+    value in the signature uses it, whatever its type.
+    """
+    # A parameterized container is a value as much as a bare one
+    cls = typing.get_origin(cls) or cls
+    if cls in PRIMITIVE_TYPES:
+        return True
+    if not isinstance(cls, type):
+        return False
+    module = getattr(cls, "__module__", None)
+    if module == ABSTRACT_INTERFACES_MODULE:
+        # `Sequence[Foo]` and `Callable[[int], str]` alike
+        return True
+    # Iterable, rather than Collection, so that the containers that only
+    # define `__iter__` are covered as well
+    return module in CONTAINER_MODULES and issubclass(cls, collections.abc.Iterable)
 
 
 class InjectorError(Exception):
@@ -43,14 +85,17 @@ class CircularDependencyError(InjectorError):
 
 class Abstract(Generic[T]):
     """
-    Abstract classes can't be passed to functions
-    expecting type[T] as they expect a concrete
-    class that can be instantiated.
-    This is a hack to be able to pass an Abstract
-    Type, without mypy complaining, but still fully type safe.
-    To configure an abstract class "Foo", instead of
-    passing just "Foo", pass "Abstract[Foo]()" to
-    the injector and to the configuration.
+    Typing marker for the abstract classes passed to the injector.
+
+    mypy rejects an abstract class where `type[T]` is expected, as it
+    could not be instantiated. The parameters that take a class are
+    typed `Union[type[T], Abstract[T]]` so that an abstract class is
+    accepted too, and it stays fully type safe: `injector.get(Foo)` is
+    a `Foo` for an abstract `Foo` as much as for a concrete one.
+
+    It is only a type. Pass the class itself, `bind(Foo)` and
+    `injector.get(Foo)`, never an instance of this marker: the code
+    asserts against one.
     """
 
 
@@ -207,7 +252,7 @@ class TypeResolver(Generic[T]):
             raise InjectorConfigurationError(
                 f"{self.cls} is abstract and it can't be injected. "
                 "You need to bind a specific concrete implementation "
-                "with bind(Abstract(Foo)).globally().to_class(ConcreteFoo)"
+                "with bind(Foo).globally().to_class(ConcreteFoo)"
             )
 
     def _check_cls_is_not_protocol(self) -> None:
@@ -243,21 +288,36 @@ class TypeResolver(Generic[T]):
                 f"Error in constructor `{constructor_name}()` for class `{cls_name}`: "
             )
 
+        def primitive_param_error() -> InjectorConfigurationError:
+            return InjectorConfigurationError(
+                constructor_error_context()
+                + f"Constructor param `{param.name}` is a primitive or "
+                f"container type: `{param.type}` that can't be injected. "
+                "Provide the value to use with `with_kwargs()` in the "
+                "injector configuration."
+            )
+
         if not param.type or param.type == inspect.Parameter.empty:
             raise InjectorConfigurationError(
                 constructor_error_context()
-                + f"Constructor param `{param}` is not typed"
+                + f"Constructor param `{param.name}` is not typed"
             )
         if param.type in PRIMITIVE_TYPES:
-            raise InjectorConfigurationError(
-                constructor_error_context()
-                + "Constructor param `{param.name}` is a primitive type: "
-                f"`{param.type}` that can't be injected. Provide the value "
-                "to use with `with_kwargs()` in the injector configuration."
-            )
+            raise primitive_param_error()
         if not is_bound:
             # Checks only for non-bound param.type
             origin_cls = typing.get_origin(param.type)
+            if _is_value_type(param.type):
+                raise primitive_param_error()
+            if isinstance(param.type, TypeVar):
+                raise InjectorConfigurationError(
+                    constructor_error_context()
+                    + f"Unable to determine how to inject param `{param.name}` "
+                    f"because it is a TypeVar: {param.type}. The generic is "
+                    "built with nothing standing in for it, so provide the "
+                    "value with `with_kwargs()`, or bind the class to an "
+                    "instance with `to_instance()`"
+                )
             if origin_cls in (typing.Union, typing.Optional):
                 raise InjectorConfigurationError(
                     constructor_error_context()
@@ -293,7 +353,7 @@ class TypeResolver(Generic[T]):
                     "c) overriding the type on the parent class "
                     "with `with_arg_types()`"
                 )
-            if callable(self.cls) and getattr(self.cls, "__supertype__", False):
+            if callable(param.type) and getattr(param.type, "__supertype__", False):
                 raise InjectorConfigurationError(
                     constructor_error_context()
                     + f"Unable to determine how to inject param `{param.name}` "
@@ -338,8 +398,12 @@ class TypeResolver(Generic[T]):
             if overriden_param_type := self._arg_types.get(param.name):
                 kwargs[param.name] = injector_context.get(overriden_param_type)
                 continue
+            # Bound for this class, as its params are resolved with it
+            # as parent: a binding scoped to another parent does not
+            # apply, so it neither overrides a default nor stands in
+            # for the checks below
             is_bound = injector_context.configuration.has_configured_bindings(
-                param.type
+                param.type, parent_cls=self.cls
             )
             has_default_value = param.default != inspect.Parameter.empty
             if has_default_value and not is_bound:
@@ -419,16 +483,38 @@ class Configuration:
 
     def get_type_resolver(
         self, cls: type[T], parent_cls: Optional[type[Any]]
-    ) -> Optional[TypeResolver[T]]:
-        if cls in self.bindings:
-            return self.bindings[cls].get_type_resolver(parent_cls=parent_cls)
-        else:
-            if cls not in self._default_type_resolvers:
-                self._default_type_resolvers[cls] = self._get_default_resolver(cls)
-            return self._default_type_resolvers[cls]
+    ) -> TypeResolver[T]:
+        """
+        The resolver to build the class with, for the given parent.
 
-    def has_configured_bindings(self, cls: Union[type[T], Abstract[T]]) -> bool:
-        return cls in self.bindings
+        A binding scoped to the parent wins over a global one. With no
+        binding that applies, the class gets the default instantiation,
+        as any class with no bindings at all: a binding scoped to
+        another parent is not a binding for this one.
+        """
+        if cls in self.bindings:
+            type_resolver = self.bindings[cls].get_type_resolver(parent_cls=parent_cls)
+            if type_resolver is not None:
+                return type_resolver
+        if cls not in self._default_type_resolvers:
+            self._default_type_resolvers[cls] = self._get_default_resolver(cls)
+        return self._default_type_resolvers[cls]
+
+    def has_configured_bindings(
+        self, cls: Union[type[T], Abstract[T]], parent_cls: Optional[type[Any]] = None
+    ) -> bool:
+        """
+        Whether a binding applies to the class when the parent asks for
+        it, or at the root with no parent. Same rules as
+        `get_type_resolver()`, so a binding scoped to another parent
+        does not count.
+        """
+        if cls not in self.bindings:
+            return False
+        # Abstract is just a trick to make mypy like
+        # abstract types passed into our injector
+        assert not isinstance(cls, Abstract)  # noqa: S101
+        return self.bindings[cls].get_type_resolver(parent_cls=parent_cls) is not None
 
 
 class Injector:
@@ -446,23 +532,46 @@ class Injector:
         # abstract types passed into our injector
         assert not isinstance(cls, Abstract)  # noqa: S101
         # Fast path for already cached instances, that avoids having
-        # to create a new injection context
+        # to create a new injection context. Compared against None, so
+        # that a falsy instance takes it as well.
         type_resolver = self._configuration.get_type_resolver(cls, parent_cls)
-        if type_resolver and (instance := type_resolver.get_cached_instance()):
+        instance = type_resolver.get_cached_instance()
+        if instance is not None:
             return instance
-        # Create a new injection context and get the instance from it
-        return InjectorContext(configuration=self._configuration).get(cls)
+        # Create a new injection context and get the instance from it.
+        # The parent is handed over to it, as it is what selects the
+        # bindings scoped to it.
+        return InjectorContext(
+            configuration=self._configuration, parent_cls=parent_cls
+        ).get(cls)
 
 
 class InjectorContext:
     configuration: Configuration
     stack: list[type[Any]]
 
-    def __init__(self, configuration: Configuration) -> None:
+    def __init__(
+        self, configuration: Configuration, parent_cls: Optional[type[Any]] = None
+    ) -> None:
         self.configuration: Configuration = configuration
+        # What this context is building, innermost last. Only ever
+        # holds classes under construction, so it detects the cycles
         self.stack: list[type[Any]] = []
+        # On whose behalf the root class is resolved. It selects the
+        # scoped bindings for it, but it is not being built, so it does
+        # not belong in the stack
+        self.parent_cls = parent_cls
 
     def get(self, cls: type[T]) -> T:
+        # Whatever is being built is the parent of its dependencies. The
+        # root one has the parent it is resolved on behalf of, if any
+        parent_cls = self.stack[-1] if self.stack else self.parent_cls
+        type_resolver = self.configuration.get_type_resolver(cls, parent_cls=parent_cls)
+        # An already resolved instance needs nothing built, so it
+        # can't be part of a cycle
+        instance = type_resolver.get_cached_instance()
+        if instance is not None:
+            return instance
         if cls in self.stack:
             raise CircularDependencyError(
                 f"Unable to instantiate {self.stack[0]} because {cls} "
@@ -470,10 +579,6 @@ class InjectorContext:
                 f"ultimately {self.stack[-1]} is needed that needs {cls} "
                 f"again. Dependency stack is: {self.stack}"
             )
-        parent_cls = self.stack[-1] if self.stack else None
-        type_resolver = self.configuration.get_type_resolver(cls, parent_cls=parent_cls)
-        if type_resolver is None:
-            raise InjectorInstantiationError(f"Unable to find a TypeResolver for {cls}")
         self.stack.append(cls)
         try:
             instance = type_resolver.resolve_type(injector_context=self)
