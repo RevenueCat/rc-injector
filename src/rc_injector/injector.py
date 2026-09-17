@@ -1,8 +1,10 @@
 import collections.abc
 import inspect
+import threading
 import types
 import typing
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from typing import (
     Annotated,
     Any,
@@ -661,9 +663,15 @@ class Configuration:
             type_resolver = self.bindings[cls].get_type_resolver(parent_cls=parent_cls)
             if type_resolver is not None:
                 return type_resolver
-        if cls not in self._default_type_resolvers:
-            self._default_type_resolvers[cls] = self._get_default_resolver(cls)
-        return self._default_type_resolvers[cls]
+        type_resolver = self._default_type_resolvers.get(cls)
+        if type_resolver is None:
+            # `setdefault()` is atomic, so two threads asking at once for
+            # a class not seen before still end up sharing one resolver,
+            # and with it one instance
+            type_resolver = self._default_type_resolvers.setdefault(
+                cls, self._get_default_resolver(cls)
+            )
+        return type_resolver
 
     def resolve_alias(self, cls: type[T], parent_cls: type[Any] | None) -> type[Any]:
         """
@@ -705,9 +713,22 @@ class Configuration:
 
 class Injector:
     _configuration: Configuration
+    _build_lock: AbstractContextManager[Any]
 
-    def __init__(self, configuration: Configuration) -> None:
+    def __init__(
+        self, configuration: Configuration, *, thread_safe: bool = True
+    ) -> None:
+        """
+        `thread_safe` serializes the builds, so that concurrent `get()`
+        calls for a class not built yet share one instance instead of
+        each building its own. Cached instances are handed out with no
+        lock either way, so the lock is only paid for when something
+        has to be built. It is re-entrant, as a constructor may ask the
+        injector for more. Turn it off for a constructor that waits on
+        another thread that uses the injector, as that would deadlock.
+        """
         self._configuration = configuration
+        self._build_lock = threading.RLock() if thread_safe else nullcontext()
 
     def get(
         self,
@@ -724,12 +745,18 @@ class Injector:
         instance = type_resolver.get_cached_instance()
         if instance is not None:
             return instance
-        # Create a new injection context and get the instance from it.
-        # The parent is handed over to it, as it is what selects the
-        # bindings scoped to it.
-        return InjectorContext(
-            configuration=self._configuration, parent_cls=parent_cls
-        ).get(cls)
+        with self._build_lock:
+            # Another thread may have built it while waiting for the
+            # lock, so it is checked again before building
+            instance = type_resolver.get_cached_instance()
+            if instance is not None:
+                return instance
+            # Create a new injection context and get the instance from
+            # it. The parent is handed over to it, as it is what selects
+            # the bindings scoped to it.
+            return InjectorContext(
+                configuration=self._configuration, parent_cls=parent_cls
+            ).get(cls)
 
 
 class InjectorContext:
