@@ -2,11 +2,13 @@ import collections
 import time
 import typing
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import (
+    Annotated,
     Any,
-    Callable,
     Generic,
+    Literal,
     NewType,
     Optional,
     Protocol,
@@ -310,11 +312,24 @@ class CircularDep_C:
         self.a = a
 
 
+class AliasCycle_A:
+    # Needs itself through a transparent alias
+    def __init__(self, a: "Annotated[AliasCycle_A, 'meta']") -> None:
+        self.a = a
+
+
 def test_circular_dependency() -> None:
     configuration = Configuration()
     injector = Injector(configuration)
     with pytest.raises(CircularDependencyError):
         injector.get(CircularDep_A)
+
+    # Needing itself through an alias is a cycle all the same, as the
+    # alias is resolved as the class it refers to
+    configuration = Configuration()
+    injector = Injector(configuration)
+    with pytest.raises(CircularDependencyError):
+        injector.get(AliasCycle_A)
 
     # An already resolved instance needs nothing built, so a binding
     # to one breaks the cycle, even for the very class being built at
@@ -357,6 +372,44 @@ def test_primitive_param() -> None:
     assert injector.get(A).foo == "bar"
 
 
+def test_value_types_cannot_be_built() -> None:
+    class Needs:
+        def __init__(self, retries: Annotated[int, "meta"] = 5) -> None:
+            self.retries = retries
+
+    annotated_int = cast(type[int], Annotated[int, "meta"])
+
+    # A primitive or a container has nothing to build, so asking for one
+    # is an error rather than a default-constructed `0`, `''` or `[]`.
+    # Directly, through an alias, or as a parameterized container
+    configuration = Configuration()
+    injector = Injector(configuration)
+    for value_type in (int, str, list, annotated_int, cast(type[Any], list[int])):
+        with pytest.raises(InjectorConfigurationError, match="primitive or container"):
+            injector.get(value_type)
+
+    # A bare binding of one is the same mistake, and it would otherwise
+    # even override the default in a signature
+    configuration = Configuration()
+    configuration.bind(annotated_int).globally()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError, match="primitive or container"):
+        injector.get(annotated_int)
+    with pytest.raises(InjectorConfigurationError, match="primitive or container"):
+        injector.get(Needs)
+
+    # The value has to be provided: with no binding the default is used,
+    # and a binding to an instance is what overrides it
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert injector.get(Needs).retries == 5
+    configuration = Configuration()
+    configuration.bind(annotated_int).globally().to_instance(7)
+    injector = Injector(configuration)
+    assert injector.get(Needs).retries == 7
+    assert injector.get(annotated_int) == 7
+
+
 def test_untyped_param() -> None:
     class A:
         def __init__(self, foo) -> None:  # type: ignore[no-untyped-def]
@@ -390,6 +443,10 @@ def test_parameterized_primitive_params() -> None:
         def __init__(self, flag: bool) -> None:
             self.flag = flag
 
+    class NeedsLiteral:
+        def __init__(self, x: Literal["a", "b"]) -> None:
+            self.x = x
+
     # A parameterized primitive is a value as much as a plain one, so it
     # can't be injected: it used to be built as an empty `list()`/`dict()`
     configuration = Configuration()
@@ -403,6 +460,8 @@ def test_parameterized_primitive_params() -> None:
     # `bool` was missing from the primitive types, so it was injected False
     with pytest.raises(InjectorConfigurationError, match="param `flag` is a primitive"):
         injector.get(NeedsBool)
+    with pytest.raises(InjectorConfigurationError, match="param `x` is a primitive"):
+        injector.get(NeedsLiteral)
 
     # The value has to be provided, as for any other primitive
     configuration = Configuration()
@@ -707,6 +766,28 @@ def test_get_with_parent_cls_needing_the_parent() -> None:
     assert handler.retries == 5
 
 
+def test_configuration_is_frozen_once_resolving() -> None:
+    class A:
+        pass
+
+    class B:
+        pass
+
+    # Bindings can be made until the first lookup, the injector being
+    # created earlier is fine...
+    configuration = Configuration()
+    injector = Injector(configuration)
+    configuration.bind(A).globally().to_class(B)
+    assert isinstance(injector.get(A), B)
+
+    # ...but not afterwards: what a class resolves to is settled on
+    # first use, so a later binding would not be seen. It fails loudly
+    with pytest.raises(InjectorConfigurationError, match="started resolving"):
+        configuration.bind(B)
+    with pytest.raises(InjectorConfigurationError, match="started resolving"):
+        configuration.bind(A)
+
+
 def test_falsy_instances() -> None:
     class Flag:
         def __init__(self, name: str = "?", on: bool = True) -> None:
@@ -788,6 +869,536 @@ def test_optional_and_union_types() -> None:
     injector = Injector(configuration)
     assert injector.get(B).a is None
     assert isinstance(injector.get(C).a_or_b, B)
+
+
+def test_pep604_optional_and_union_types() -> None:
+    class A:
+        pass
+
+    class B:
+        def __init__(self, a: A | None) -> None:
+            self.a = a
+
+    class C:
+        def __init__(self, a_or_b: A | B) -> None:
+            self.a_or_b = a_or_b
+
+    # If not bound, it will fail
+    configuration = Configuration()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(B)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(C)
+
+    # Just binding the classes, will fail
+    configuration = Configuration()
+    configuration.bind(A).globally()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(B)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(C)
+
+    # Binding the union without saying what to build will fail too,
+    # as there is nothing to instantiate for a union
+    configuration = Configuration()
+    configuration.bind(cast(type[A], A | None)).globally()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(B)
+
+    # Explicitly binding the unions works. To bind them you will need
+    # to cast the complex type to make strict type-check happy
+    configuration = Configuration()
+    configuration.bind(cast(type[A], A | None)).globally().to_class(A)
+    configuration.bind(cast(type[A], A | B)).globally().to_class(A)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(B).a, A)
+    assert isinstance(injector.get(C).a_or_b, A)
+
+    configuration = Configuration()
+    configuration.bind(B).globally().with_arg_types(a=A)
+    configuration.bind(C).globally().with_arg_types(a_or_b=B)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(B).a, A)
+    assert isinstance(injector.get(C).a_or_b, B)
+
+    configuration = Configuration()
+    configuration.bind(B).globally().with_kwargs(a=None)
+    configuration.bind(C).globally().with_kwargs(a_or_b=B(A()))
+    injector = Injector(configuration)
+    assert injector.get(B).a is None
+    assert isinstance(injector.get(C).a_or_b, B)
+
+
+def test_pep604_and_typing_unions_are_interchangeable() -> None:
+    class A:
+        pass
+
+    class UsesPep604:
+        def __init__(self, a: A | None) -> None:
+            self.a = a
+
+    class UsesOptional:
+        def __init__(self, a: Optional[A]) -> None:
+            self.a = a
+
+    # `A | None` and `Optional[A]` are the very same type, so a
+    # binding made with either syntax resolves both constructors
+    configuration = Configuration()
+    configuration.bind(cast(type[A], Optional[A])).globally().to_class(A)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(UsesPep604).a, A)
+    assert isinstance(injector.get(UsesOptional).a, A)
+
+    configuration = Configuration()
+    configuration.bind(cast(type[A], A | None)).globally().to_class(A)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(UsesPep604).a, A)
+    assert isinstance(injector.get(UsesOptional).a, A)
+
+
+def test_annotated_params() -> None:
+    class A:
+        pass
+
+    class NeedsAnnotated:
+        def __init__(self, a: Annotated[A, "meta"]) -> None:
+            self.a = a
+
+    class NeedsAnnotatedUnion:
+        def __init__(self, a: Annotated[Optional[A], "meta"]) -> None:
+            self.a = a
+
+    class NeedsAnnotatedStr:
+        def __init__(self, s: Annotated[str, "db_url"]) -> None:
+            self.s = s
+
+    # `Annotated` only decorates the type, so it is injected as the
+    # type it decorates, sharing its instance
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert isinstance(injector.get(NeedsAnnotated).a, A)
+    assert id(injector.get(NeedsAnnotated).a) == id(injector.get(A))
+
+    # And what it decorates is checked as usual
+    configuration = Configuration()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(NeedsAnnotatedUnion)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(NeedsAnnotatedStr)
+
+    # An explicit binding wins over the decorated type, so `Annotated`
+    # can be used to tell apart params that share the same type
+    configuration = Configuration()
+    configuration.bind(
+        cast(type[str], Annotated[str, "db_url"])
+    ).globally().to_instance("postgres://")
+    injector = Injector(configuration)
+    assert injector.get(NeedsAnnotatedStr).s == "postgres://"
+
+
+def test_annotated_param_uses_the_bindings_of_its_type() -> None:
+    class AbstractFoo(ABC):
+        @abstractmethod
+        def foo(self) -> None: ...
+
+    class ConcreteFoo(AbstractFoo):
+        def foo(self) -> None: ...
+
+    class ProtocolFoo(Protocol):
+        def foo(self) -> None: ...
+
+    class ImplementsFoo:
+        def foo(self) -> None: ...
+
+    class Plain:
+        pass
+
+    default_plain = Plain()
+
+    class NeedsAbstract:
+        def __init__(self, a: Annotated[AbstractFoo, "meta"]) -> None:
+            self.a = a
+
+    class NeedsProtocol:
+        def __init__(self, a: Annotated[ProtocolFoo, "meta"]) -> None:
+            self.a = a
+
+    class NeedsUnion:
+        def __init__(self, a: Annotated[Optional[ConcreteFoo], "meta"]) -> None:
+            self.a = a
+
+    class NeedsPlainWithDefault:
+        def __init__(self, a: Annotated[Plain, "meta"] = default_plain) -> None:
+            self.a = a
+
+    # An `Annotated` param with no binding of its own is the type it
+    # refers to, bindings included: an abstract class, a Protocol or
+    # a union that is bound is injected as configured...
+    configuration = Configuration()
+    configuration.bind(AbstractFoo).globally().to_class(ConcreteFoo)
+    configuration.bind(ProtocolFoo).globally().to_class(ImplementsFoo)
+    configuration.bind(
+        cast(type[ConcreteFoo], Optional[ConcreteFoo])
+    ).globally().to_class(ConcreteFoo)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(NeedsAbstract).a, ConcreteFoo)
+    assert isinstance(injector.get(NeedsProtocol).a, ImplementsFoo)
+    assert isinstance(injector.get(NeedsUnion).a, ConcreteFoo)
+
+    # ...and a binding overrides the default in the signature, as it
+    # does for a plain param
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert injector.get(NeedsPlainWithDefault).a is default_plain
+    configuration = Configuration()
+    configuration.bind(Plain).globally()
+    injector = Injector(configuration)
+    assert injector.get(NeedsPlainWithDefault).a is not default_plain
+
+
+def test_transparent_alias_shares_binding_and_instance() -> None:
+    class A:
+        pass
+
+    class B(A):
+        pass
+
+    class NeedsA:
+        def __init__(self, a: A) -> None:
+            self.a = a
+
+    annotated_a = cast(type[A], Annotated[A, "meta"])
+
+    # An alias with no binding of its own is what it refers to: asked
+    # for directly, it is resolved through the binding of its target...
+    configuration = Configuration()
+    configuration.bind(A).globally().to_class(B)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(annotated_a), B)
+
+    # ...and shares its instance, so there is a single singleton
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert injector.get(annotated_a) is injector.get(A)
+
+    # The same when the alias is the type to inject for a param, or
+    # the class to build, by configuration
+    configuration = Configuration()
+    configuration.bind(A).globally().to_class(B)
+    configuration.bind(NeedsA).globally().with_arg_types(a=annotated_a)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(NeedsA).a, B)
+
+    class Wanted:
+        pass
+
+    configuration = Configuration()
+    configuration.bind(A).globally().to_class(B)
+    configuration.bind(Wanted).globally().to_class(cast(type[Wanted], annotated_a))
+    injector = Injector(configuration)
+    assert isinstance(injector.get(Wanted), B)
+
+    # And a binding scoped to the parent it is resolved for applies
+    configuration = Configuration()
+    configuration.bind(A).for_parent(NeedsA).to_class(B)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(annotated_a, parent_cls=NeedsA), B)
+    assert not isinstance(injector.get(annotated_a), B)
+
+
+def test_class_asked_through_an_alias_is_built_as_itself() -> None:
+    class Dep:
+        pass
+
+    class DepForReal(Dep):
+        pass
+
+    class Real:
+        def __init__(self, dep: Dep) -> None:
+            self.dep = dep
+
+    annotated_real = cast(type[Real], Annotated[Real, "meta"])
+
+    # Asked for through an alias, a class is still the parent of its
+    # own dependencies, so the bindings scoped to it apply...
+    configuration = Configuration()
+    configuration.bind(Dep).for_parent(Real).to_class(DepForReal)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(annotated_real).dep, DepForReal)
+    # ...and the instance built is the very one the class itself gets
+    assert injector.get(Real) is injector.get(annotated_real)
+    assert isinstance(injector.get(Real).dep, DepForReal)
+
+
+@pytest.mark.skipif(
+    not hasattr(typing, "TypeAliasType"),
+    reason="PEP 695 `type Foo = ...` aliases need Python 3.12+",
+)
+def test_nested_alias_resolves_layer_by_layer() -> None:
+    class A:
+        pass
+
+    class B(A):
+        pass
+
+    class C(A):
+        pass
+
+    # Same as `type Inner = A` and `type Outer = Inner`
+    type_alias_type: Any = getattr(typing, "TypeAliasType", None)
+    inner = type_alias_type("Inner", A)
+    outer = type_alias_type("Outer", inner)
+    annotated_inner = cast(type[A], Annotated[inner, "meta"])
+
+    class NeedsOuter:
+        def __init__(self, a: outer) -> None:  # type: ignore[valid-type]
+            self.a = a
+
+    # A binding on an intermediate alias is where the resolution stops,
+    # so the layers above share its binding and its instance, asked for
+    # directly or as a dependency, while the innermost type keeps its own
+    configuration = Configuration()
+    configuration.bind(cast(type[A], inner)).globally().to_class(B)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(outer), B)
+    assert isinstance(injector.get(annotated_inner), B)
+    assert isinstance(injector.get(NeedsOuter).a, B)
+    assert injector.get(outer) is injector.get(inner)
+    assert type(injector.get(A)) is A
+
+    # A binding on an outer layer wins over the inner ones
+    configuration = Configuration()
+    configuration.bind(cast(type[A], inner)).globally().to_class(B)
+    configuration.bind(cast(type[A], outer)).globally().to_class(C)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(outer), C)
+    assert isinstance(injector.get(inner), B)
+
+
+@pytest.mark.skipif(
+    not hasattr(typing, "TypeAliasType"),
+    reason="PEP 695 `type Foo = ...` aliases need Python 3.12+",
+)
+def test_pep695_type_alias() -> None:
+    class A:
+        pass
+
+    class B:
+        pass
+
+    # Same as `type AliasOfA = A` and `type AliasOfUnion = A | None`,
+    # built dynamically so this module still parses on Python < 3.12
+    type_alias_type: Any = getattr(typing, "TypeAliasType", None)
+    alias_of_a = type_alias_type("AliasOfA", A)
+    alias_of_union = type_alias_type("AliasOfUnion", Optional[A])
+
+    class NeedsAliasOfA:
+        def __init__(self, a: alias_of_a) -> None:  # type: ignore[valid-type]
+            self.a = a
+
+    class NeedsAliasOfUnion:
+        def __init__(self, a: alias_of_union) -> None:  # type: ignore[valid-type]
+            self.a = a
+
+    # A `type` alias is transparent, so it is injected as the type it
+    # refers to, sharing its instance
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert isinstance(injector.get(NeedsAliasOfA).a, A)
+    assert id(injector.get(NeedsAliasOfA).a) == id(injector.get(A))
+    # Asked for directly as well, and through the binding of the type
+    # it refers to
+    assert injector.get(alias_of_a) is injector.get(A)
+    configuration = Configuration()
+    configuration.bind(A).globally().to_class(B)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(alias_of_a), B)
+
+    # An alias of a union is still a union
+    configuration = Configuration()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(NeedsAliasOfUnion)
+
+    # And binding the alias itself wins over what it refers to
+    configuration = Configuration()
+    configuration.bind(cast(type[A], alias_of_a)).globally().to_class(B)
+    configuration.bind(cast(type[A], alias_of_union)).globally().to_class(A)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(NeedsAliasOfA).a, B)
+    assert isinstance(injector.get(NeedsAliasOfUnion).a, A)
+
+
+@pytest.mark.skipif(
+    not hasattr(typing, "TypeAliasType"),
+    reason="PEP 695 `type Foo = ...` aliases need Python 3.12+",
+)
+def test_pep695_type_alias_is_checked_as_its_target() -> None:
+    class AbstractFoo(ABC):
+        @abstractmethod
+        def foo(self) -> None: ...
+
+    class ProtocolFoo(Protocol):
+        def foo(self) -> None: ...
+
+    UserId = NewType("UserId", int)
+
+    # An alias is checked as the type it refers to, so the error names
+    # what is wrong with it instead of failing in the constructor
+    type_alias_type: Any = getattr(typing, "TypeAliasType", None)
+    for alias, kind in (
+        (type_alias_type("AliasOfAbstract", AbstractFoo), "abstract"),
+        (type_alias_type("AliasOfProtocol", ProtocolFoo), "a Protocol"),
+        (type_alias_type("AliasOfNewType", UserId), "a NewType"),
+    ):
+        configuration = Configuration()
+        injector = Injector(configuration)
+        with pytest.raises(InjectorConfigurationError, match=rf"is {kind}"):
+            injector.get(alias)
+
+
+@pytest.mark.skipif(
+    not hasattr(typing, "TypeAliasType"),
+    reason="PEP 695 `type Foo = ...` aliases need Python 3.12+",
+)
+def test_pep695_type_alias_loop() -> None:
+    # Only the `type` statement can build an alias that refers back to
+    # itself, as it evaluates its value lazily. Run as text so this
+    # module still parses on Python < 3.12
+    aliases: dict[str, Any] = {"Annotated": Annotated}
+    exec(  # noqa: S102
+        "type Loop = Loop\n"
+        "type Ping = Pong\n"
+        "type Pong = Ping\n"
+        "type Wrapped = Annotated[Wrapped, 'meta']\n"
+        "type Json = dict[str, Json] | list[Json] | str | None\n",
+        aliases,
+    )
+
+    loop = aliases["Loop"]
+
+    class NeedsLoop:
+        def __init__(self, a: loop) -> None:  # type: ignore[valid-type]
+            self.a = a
+
+    # An alias loop has no type to build, so it is an error rather
+    # than an endless loop, asked for directly or as a dependency
+    configuration = Configuration()
+    injector = Injector(configuration)
+    for name in ("Loop", "Ping", "Wrapped"):
+        with pytest.raises(InjectorConfigurationError, match="refers back to itself"):
+            injector.get(aliases[name])
+    with pytest.raises(InjectorConfigurationError, match="refers back to itself"):
+        injector.get(NeedsLoop)
+
+    # A recursive alias is not a loop: only its top level is resolved,
+    # and here that is a union
+    with pytest.raises(InjectorConfigurationError, match="is a union"):
+        injector.get(aliases["Json"])
+
+
+def test_class_with_value_attribute_is_not_an_alias() -> None:
+    class A:
+        __value__ = "some value"
+
+    class NeedsA:
+        def __init__(self, a: A) -> None:
+            self.a = a
+
+    # Only a `type` alias resolves to what it refers to. A class with
+    # a `__value__` attribute of its own is just a class
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert isinstance(injector.get(A), A)
+    assert isinstance(injector.get(NeedsA).a, A)
+
+
+# Text-based annotations, either quoted forward references or the ones
+# produced by `from __future__ import annotations`, can only be resolved
+# for types reachable from the globals of the constructor's module
+class TextAnnotation_Dep:
+    pass
+
+
+class TextAnnotation_OtherDep:
+    pass
+
+
+class TextAnnotation_UsesClass:
+    def __init__(self, dep: "TextAnnotation_Dep") -> None:
+        self.dep = dep
+
+
+class TextAnnotation_UsesPep604:
+    def __init__(self, dep: "TextAnnotation_Dep | None") -> None:
+        self.dep = dep
+
+
+class TextAnnotation_UsesOptional:
+    def __init__(self, dep: "Optional[TextAnnotation_Dep]") -> None:
+        self.dep = dep
+
+
+class TextAnnotation_UsesUnion:
+    def __init__(
+        self, dep: "Union[TextAnnotation_Dep, TextAnnotation_OtherDep]"
+    ) -> None:
+        self.dep = dep
+
+
+def test_text_based_annotations() -> None:
+    # Plain classes are injected as usual
+    configuration = Configuration()
+    injector = Injector(configuration)
+    assert isinstance(injector.get(TextAnnotation_UsesClass).dep, TextAnnotation_Dep)
+
+    # Unions are recognized, whichever their spelling, so they will
+    # fail unless bound
+    configuration = Configuration()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(TextAnnotation_UsesPep604)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(TextAnnotation_UsesOptional)
+    with pytest.raises(InjectorConfigurationError):
+        injector.get(TextAnnotation_UsesUnion)
+
+    # And binding them works. A single `Optional` binding covers the
+    # PEP 604 spelling of the same union as well
+    configuration = Configuration()
+    configuration.bind(
+        cast(type[TextAnnotation_Dep], Optional[TextAnnotation_Dep])
+    ).globally().to_class(TextAnnotation_Dep)
+    configuration.bind(
+        cast(
+            type[TextAnnotation_Dep],
+            Union[TextAnnotation_Dep, TextAnnotation_OtherDep],
+        )
+    ).globally().to_class(TextAnnotation_OtherDep)
+    injector = Injector(configuration)
+    assert isinstance(injector.get(TextAnnotation_UsesPep604).dep, TextAnnotation_Dep)
+    assert isinstance(injector.get(TextAnnotation_UsesOptional).dep, TextAnnotation_Dep)
+    assert isinstance(
+        injector.get(TextAnnotation_UsesUnion).dep, TextAnnotation_OtherDep
+    )
+
+
+def test_text_based_annotation_out_of_global_scope_fails() -> None:
+    class LocalDep:
+        pass
+
+    class UsesLocalDep:
+        def __init__(self, dep: "LocalDep | None") -> None:
+            self.dep = dep
+
+    configuration = Configuration()
+    injector = Injector(configuration)
+    with pytest.raises(InjectorInstantiationError):
+        injector.get(UsesLocalDep)
 
 
 def test_bind_new_type_and_type_alias() -> None:

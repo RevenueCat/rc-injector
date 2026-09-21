@@ -7,7 +7,7 @@ Python dependency injector.
 ```
 pip install rc-injector
 ```
-Requires Python 3.9 or newer.
+Requires Python 3.10 or newer.
 ## Example usage:
 Suppose you have your app with blueprints, and the blueprints can use a bunch of helpers like ConfigurationProvider, CacheClient, DBClient, Events, Jobs...
 
@@ -223,8 +223,35 @@ The injector will refuse to build `Optional` and `Union` types by default, as it
 
 For `Optional[Foo]` and `Union[Foo, Bar]` types binding just `Foo` will not work. You can `bind(Optional[Foo])` and `bind[Foo, Bar]` and map them normally to a instance, concrete class or constructor.
 
+The PEP 604 syntax is supported as well: `Foo | None` and `Foo | Bar` behave exactly like `Optional[Foo]` and `Union[Foo, Bar]`. Both spellings build the very same type, so a single binding resolves either of them:
+
+```python
+class Baz:
+    def __init__(self, foo: Foo | None) -> None:
+        ...
+
+# Either of these bindings resolves the `foo` param above:
+configuration.bind(cast(type[Foo], Foo | None)).globally().to_class(Foo)
+configuration.bind(cast(type[Foo], Optional[Foo])).globally().to_class(Foo)
+```
+
+## Annotated and type aliases
+`Annotated[Foo, ...]` (PEP 593) and the `type Foo = ...` aliases (PEP 695, Python 3.12+) only decorate another type, so they are injected as the type they refer to, sharing its instance. Nesting them works as well.
+
+Binding them takes precedence over what they refer to, which makes `Annotated` handy to tell apart params that would otherwise share the same type:
+
+```python
+class App:
+    def __init__(self, db_url: Annotated[str, "db_url"]) -> None:
+        ...
+
+configuration.bind(cast(type[str], Annotated[str, "db_url"])).globally().to_instance("postgres://...")
+```
+
+Note that a `NewType` is not an alias: it is a distinct type, so it has to be bound explicitly.
+
 ## Primitives and values
-Primitive types (`str`, `int`, `bool`, `bytes`, ...) can't be injected. You have to provide the value to use with `with_kwargs()`, or give the param a default in the signature.
+Primitive types (`str`, `int`, `bool`, `bytes`, ...) and `Literal[...]` types can't be injected. You have to provide the value to use with `with_kwargs()`, or give the param a default in the signature.
 
 Containers are values as well, the parameterized ones included: `list[Foo]` is never built as a list of injected `Foo`s, even though `Foo` itself is injectable. That covers the builtin containers, the whole `collections` family and every abstract interface on `collections.abc` (`Sequence[Foo]`, `Mapping[str, Foo]`, `Callable[[int], str]`, ...), as none of them has an implementation to build. A container class of your own is a dependency like any other class, so it is injected normally.
 

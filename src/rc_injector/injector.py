@@ -1,14 +1,15 @@
 import collections.abc
 import inspect
+import types
 import typing
+from collections.abc import Callable
 from typing import (
+    Annotated,
     Any,
-    Callable,
     Generic,
+    Literal,
     NamedTuple,
-    Optional,
     TypeVar,
-    Union,
     cast,
 )
 
@@ -38,6 +39,88 @@ CONTAINER_MODULES = {"builtins", "collections"}
 # implementation to build
 ABSTRACT_INTERFACES_MODULE = "collections.abc"
 
+# The PEP 604 syntax `Foo | None` builds a `types.UnionType`, while
+# `Optional[Foo]` and `Union[Foo, Bar]` build a `typing.Union`, and
+# `typing.get_origin()` reports a different origin for each of them.
+# Both flavors compare and hash equal, so they are interchangeable as
+# binding keys, but any check on the origin has to accept both.
+UNION_ORIGINS: set[Any] = {typing.Union, typing.Optional, types.UnionType}
+
+
+def _eval_annotation(annotation: str, globalns: dict[str, Any]) -> Any:
+    """
+    Evaluate a text annotation on the scope it was defined in.
+
+    Annotations are text when they are quoted forward references or
+    when the module uses `from __future__ import annotations`. They
+    can be plain class names ("Foo"), but also expressions such as
+    "Foo | None", "Optional[Foo]" or "Union[Foo, Bar]".
+    """
+    # Evaluated on a copy of the globals, as `eval()` would otherwise
+    # inject `__builtins__` into the module that defined the annotation
+    return eval(annotation, dict(globalns))  # noqa: S307
+
+
+# `type Foo = ...` aliases (PEP 695) build a `typing.TypeAliasType`,
+# that only exists on Python 3.12+. With no such type, `isinstance()`
+# against an empty tuple is simply never true
+_TYPE_ALIAS_TYPES: tuple[type[Any], ...] = (
+    (typing.TypeAliasType,) if hasattr(typing, "TypeAliasType") else ()
+)
+
+
+def _is_transparent_type(cls: Any) -> bool:
+    """
+    Whether the annotation just decorates another type.
+
+    `Annotated[Foo, ...]` (PEP 593) and the `type Foo = ...` aliases
+    (PEP 695) are transparent for type checkers, they are only a
+    decorated way to refer to another type.
+
+    Note that `NewType`s are **not** transparent: unlike the above,
+    they are a distinct type and not a mere alias of their supertype.
+    """
+    return typing.get_origin(cls) is Annotated or isinstance(cls, _TYPE_ALIAS_TYPES)
+
+
+def _unwrap_transparent_type(cls: Any) -> Any:
+    """
+    The type one layer of transparent annotation refers to.
+
+    Checked apart from the unwrapping, with `_is_transparent_type()`,
+    as an alias can refer to itself and then unwraps to the very same
+    object.
+    """
+    if typing.get_origin(cls) is Annotated:
+        return typing.get_args(cls)[0]
+    # PEP 695 aliases keep the type they refer to in `__value__`
+    return cls.__value__
+
+
+def _check_alias_does_not_loop(seen: list[Any], step: Any) -> None:
+    # An alias can refer back to itself (`type Foo = Foo`), directly or
+    # through other aliases, and then there is nothing it stands for
+    if step in seen:
+        chain = " -> ".join(str(item) for item in [*seen, step])
+        raise InjectorConfigurationError(
+            f"{seen[0]} is an alias that refers back to itself "
+            f"({chain}), so there is no type to build for it"
+        )
+
+
+def _unwrap_transparent_types(cls: Any) -> Any:
+    """
+    Resolve every layer of transparent annotation, down to the type the
+    aliases ultimately refer to. See `_unwrap_transparent_type()`.
+    """
+    seen: list[Any] = [cls]
+    while _is_transparent_type(cls):
+        unwrapped = _unwrap_transparent_type(cls)
+        _check_alias_does_not_loop(seen, unwrapped)
+        seen.append(unwrapped)
+        cls = unwrapped
+    return cls
+
 
 def _is_value_type(cls: Any) -> bool:
     """
@@ -54,7 +137,7 @@ def _is_value_type(cls: Any) -> bool:
     """
     # A parameterized container is a value as much as a bare one
     cls = typing.get_origin(cls) or cls
-    if cls in PRIMITIVE_TYPES:
+    if cls in PRIMITIVE_TYPES or cls is Literal:
         return True
     if not isinstance(cls, type):
         return False
@@ -89,7 +172,7 @@ class Abstract(Generic[T]):
 
     mypy rejects an abstract class where `type[T]` is expected, as it
     could not be instantiated. The parameters that take a class are
-    typed `Union[type[T], Abstract[T]]` so that an abstract class is
+    typed `type[T] | Abstract[T]` so that an abstract class is
     accepted too, and it stays fully type safe: `injector.get(Foo)` is
     a `Foo` for an abstract `Foo` as much as for a concrete one.
 
@@ -111,9 +194,9 @@ class TypeResolver(Generic[T]):
     """
 
     cls: type[T]
-    _to_instance: Optional[T]
-    _to_class: Optional[type[Any]]
-    _to_constructor: Optional[Callable[..., T]]
+    _to_instance: T | None
+    _to_class: type[Any] | None
+    _to_constructor: Callable[..., T] | None
     _kwargs: dict[str, Any]
     _arg_types: dict[str, type[Any]]
 
@@ -214,6 +297,35 @@ class TypeResolver(Generic[T]):
             self._arg_types[k] = v
         return self
 
+    def _resolve_text_annotation(
+        self, constructor: Callable[..., Any], param: inspect.Parameter
+    ) -> type[Any]:
+        """
+        Convert a text-based annotation into the real type it refers to.
+
+        It is evaluated on the scope of the constructor's module, so
+        only the types reachable from there can be resolved.
+        """
+        constructor_context = getattr(constructor, "__globals__", None)
+        if constructor_context is None:
+            raise InjectorInstantiationError(
+                f"Unable to parse constructor signature for class {self.cls}: "
+                f"Param {param.name} has a text signature {param.annotation} "
+                "and we are unable to find the constructor globals."
+            )
+        try:
+            return cast(
+                type[Any], _eval_annotation(param.annotation, constructor_context)
+            )
+        except Exception as e:
+            raise InjectorInstantiationError(
+                f"Unable to parse constructor signature for class {self.cls}: "
+                f"Param {param.name} has a text signature {param.annotation} "
+                f"that we are unable to evaluate: {e}. Only the types "
+                "reachable from the globals of the constructor's module "
+                "can be resolved."
+            ) from e
+
     def _get_params(
         self, constructor: Callable[..., Any], is_init: bool = False
     ) -> list[Param]:
@@ -226,18 +338,7 @@ class TypeResolver(Generic[T]):
                 continue
             param_type: type[Any]
             if isinstance(param.annotation, str):
-                # Text-based annotation. Convert to real class
-                candidate_param_type = constructor.__globals__.get(param.annotation)
-                if candidate_param_type is None or not isinstance(
-                    candidate_param_type, type
-                ):
-                    raise InjectorInstantiationError(
-                        f"Unable to parse constructor signature for class {self.cls}: "
-                        f"Param {param.name} has a text signature {param.annotation} "
-                        "and we are unable to find that class in globals or not a "
-                        "class."
-                    )
-                param_type = candidate_param_type
+                param_type = self._resolve_text_annotation(constructor, param)
             else:
                 param_type = param.annotation
 
@@ -246,29 +347,57 @@ class TypeResolver(Generic[T]):
             )
         return params[1:] if is_init else params
 
-    def _check_cls_is_not_abstract(self) -> None:
-        if inspect.isabstract(self.cls):
+    def _check_cls_is_not_value_type(self, cls: Any) -> None:
+        if _is_value_type(cls):
+            # A value has nothing to build: a default-constructed one,
+            # `0`, `''` or `[]`, is never what was meant
+            raise InjectorConfigurationError(
+                f"{self._describe(cls)} is a primitive or container type "
+                "that can't be built. Provide the value with `with_kwargs()` "
+                "on the class that needs it, or bind it to a specific value "
+                "with `to_instance()`"
+            )
+
+    def _check_cls_is_not_union(self, cls: Any) -> None:
+        if typing.get_origin(cls) in UNION_ORIGINS:
+            # Unions have multiple alternatives, so there is nothing to build
+            raise InjectorConfigurationError(
+                f"{self._describe(cls)} is a union and it can't be "
+                "instantiated directly. "
+                "You need to bind it to one of its alternatives with "
+                "bind(cast(type[Foo], Optional[Foo])).globally().to_class(Foo)"
+            )
+
+    def _describe(self, cls: Any) -> str:
+        # The class as it was asked for and, when that is an alias,
+        # what it refers to, which is what the checks look at
+        if cls is self.cls:
+            return str(self.cls)
+        return f"{self.cls} (alias of {cls})"
+
+    def _check_cls_is_not_abstract(self, cls: Any) -> None:
+        if inspect.isabstract(cls):
             # Abstract classes can't be instantiated directly
             raise InjectorConfigurationError(
-                f"{self.cls} is abstract and it can't be injected. "
+                f"{self._describe(cls)} is abstract and it can't be injected. "
                 "You need to bind a specific concrete implementation "
                 "with bind(Foo).globally().to_class(ConcreteFoo)"
             )
 
-    def _check_cls_is_not_protocol(self) -> None:
-        if getattr(self.cls, "_is_protocol", False):
+    def _check_cls_is_not_protocol(self, cls: Any) -> None:
+        if getattr(cls, "_is_protocol", False):
             # Protocol classes can't be instantiated directly
             raise InjectorConfigurationError(
-                f"{self.cls} is a Protocol and it can't be injected. "
+                f"{self._describe(cls)} is a Protocol and it can't be injected. "
                 "You need to bind a specific implementation of the Protocol"
                 "with bind(MyProtocol).globally().to_class(ImplementsMyProtocol)"
             )
 
-    def _check_cls_is_not_newtype(self) -> None:
-        if callable(self.cls) and getattr(self.cls, "__supertype__", False):
+    def _check_cls_is_not_newtype(self, cls: Any) -> None:
+        if callable(cls) and getattr(cls, "__supertype__", False):
             # NewType classes can't be instantiated directly
             raise InjectorConfigurationError(
-                f"{self.cls} is a NewType and it can't be injected. "
+                f"{self._describe(cls)} is a NewType and it can't be injected. "
                 "You need to bind a specific implementation of the Protocol"
                 "with bind(MyNewType).globally().to_class(Foo)"
             )
@@ -318,7 +447,7 @@ class TypeResolver(Generic[T]):
                     "value with `with_kwargs()`, or bind the class to an "
                     "instance with `to_instance()`"
                 )
-            if origin_cls in (typing.Union, typing.Optional):
+            if origin_cls in UNION_ORIGINS:
                 raise InjectorConfigurationError(
                     constructor_error_context()
                     + f"Unable to determine how to inject param `{param.name}` "
@@ -364,25 +493,31 @@ class TypeResolver(Generic[T]):
                     "on the class that needs the param"
                 )
 
-    def get_cached_instance(self) -> Optional[T]:
+    def get_cached_instance(self) -> T | None:
         return self._to_instance
 
     def resolve_type(self, injector_context: "InjectorContext") -> T:
         if self._to_instance is not None:
             return self._to_instance
         if self._to_class is not None:
-            return cast(T, injector_context.get(self._to_class))
+            # Cached as well, so that once the class it is bound to is
+            # built, this one is handed out with no further resolution
+            instance = cast(T, injector_context.get(self._to_class))
+            self._to_instance = instance
+            return instance
         if self._to_constructor is not None:
             constructor = self._to_constructor
             params = self._get_params(constructor)
         else:
-            # No overrides, we will build the class itself
-            self._check_cls_is_not_abstract()
-            self._check_cls_is_not_protocol()
-            self._check_cls_is_not_newtype()
-
-            cls = self.cls
-            if origin_cls := typing.get_origin(self.cls):
+            # No overrides, we will build the class itself: the one an
+            # alias refers to, when it is one, and the checks look at it
+            cls = _unwrap_transparent_types(self.cls)
+            self._check_cls_is_not_value_type(cls)
+            self._check_cls_is_not_union(cls)
+            self._check_cls_is_not_abstract(cls)
+            self._check_cls_is_not_protocol(cls)
+            self._check_cls_is_not_newtype(cls)
+            if origin_cls := typing.get_origin(cls):
                 # For generic classes, we need to instantiate the
                 # origin class
                 cls = origin_cls
@@ -398,11 +533,16 @@ class TypeResolver(Generic[T]):
             if overriden_param_type := self._arg_types.get(param.name):
                 kwargs[param.name] = injector_context.get(overriden_param_type)
                 continue
-            # Bound for this class, as its params are resolved with it
-            # as parent: a binding scoped to another parent does not
-            # apply, so it neither overrides a default nor stands in
-            # for the checks below
-            is_bound = injector_context.configuration.has_configured_bindings(
+            # An alias with no binding of its own is the type it refers
+            # to, bindings included. And bound for this class, as its
+            # params are resolved with it as parent: a binding scoped to
+            # another parent does not apply, so it neither overrides a
+            # default nor stands in for the checks below
+            configuration = injector_context.configuration
+            param = param._replace(
+                type=configuration.resolve_alias(param.type, parent_cls=self.cls)
+            )
+            is_bound = configuration.has_configured_bindings(
                 param.type, parent_cls=self.cls
             )
             has_default_value = param.default != inspect.Parameter.empty
@@ -436,7 +576,7 @@ class Binding(Generic[T]):
         cls: type[T],
     ):
         self.cls = cls
-        self.global_resolver: Optional[TypeResolver[T]] = None
+        self.global_resolver: TypeResolver[T] | None = None
         self.scoped_resolvers: dict[type[Any], TypeResolver[T]] = {}
 
     def globally(self) -> TypeResolver[T]:
@@ -449,9 +589,7 @@ class Binding(Generic[T]):
             self.scoped_resolvers[parent_cls] = TypeResolver[T](self.cls)
         return self.scoped_resolvers[parent_cls]
 
-    def get_type_resolver(
-        self, parent_cls: Optional[type[T]]
-    ) -> Optional[TypeResolver[T]]:
+    def get_type_resolver(self, parent_cls: type[T] | None) -> TypeResolver[T] | None:
         if parent_cls and parent_cls in self.scoped_resolvers:
             return self.scoped_resolvers[parent_cls]
         return self.global_resolver
@@ -460,12 +598,18 @@ class Binding(Generic[T]):
 class Configuration:
     bindings: dict[type[Any], Binding[Any]]
     _default_type_resolvers: dict[type[Any], TypeResolver[Any]]
+    _settled_type_resolvers: dict[tuple[Any, Any], TypeResolver[Any]]
 
     def __init__(self) -> None:
         self.bindings = {}
         self._default_type_resolvers = {}
+        # What each (class, parent) asked for resolves to, once settled,
+        # so that handing out an instance is one lookup whatever the
+        # bindings and aliases involved. It only depends on the bindings,
+        # which is why those can't change once resolving has started
+        self._settled_type_resolvers = {}
 
-    def bind(self, cls: Union[type[T], Abstract[T]]) -> Binding[T]:
+    def bind(self, cls: type[T] | Abstract[T]) -> Binding[T]:
         # Abstract is just a trick to make mypy like
         # abstract types passed into our injector
         assert not isinstance(cls, Abstract)  # noqa: S101
@@ -473,6 +617,12 @@ class Configuration:
             raise InjectorConfigurationError(
                 "Primitive types can't be bound. If you need to inject "
                 "a specific value, use `with_kwargs()` on the parent class"
+            )
+        if self._settled_type_resolvers:
+            raise InjectorConfigurationError(
+                f"Unable to bind {cls}: the configuration can't change once the "
+                "injector has started resolving, as what each class resolves "
+                "to is settled on first use. Complete the bindings first."
             )
         if cls not in self.bindings:
             self.bindings[cls] = Binding[T](cls)
@@ -482,7 +632,7 @@ class Configuration:
         return TypeResolver[T](cls)
 
     def get_type_resolver(
-        self, cls: type[T], parent_cls: Optional[type[Any]]
+        self, cls: type[T], parent_cls: type[Any] | None
     ) -> TypeResolver[T]:
         """
         The resolver to build the class with, for the given parent.
@@ -491,7 +641,22 @@ class Configuration:
         binding that applies, the class gets the default instantiation,
         as any class with no bindings at all: a binding scoped to
         another parent is not a binding for this one.
+
+        A transparent alias with no binding of its own is resolved as
+        the type it refers to, so it shares its binding and its
+        instance. See `resolve_alias()`.
         """
+        key = (cls, parent_cls)
+        type_resolver = self._settled_type_resolvers.get(key)
+        if type_resolver is None:
+            type_resolver = self._resolve_type_resolver(cls, parent_cls)
+            self._settled_type_resolvers[key] = type_resolver
+        return type_resolver
+
+    def _resolve_type_resolver(
+        self, cls: type[T], parent_cls: type[Any] | None
+    ) -> TypeResolver[T]:
+        cls = self.resolve_alias(cls, parent_cls=parent_cls)
         if cls in self.bindings:
             type_resolver = self.bindings[cls].get_type_resolver(parent_cls=parent_cls)
             if type_resolver is not None:
@@ -500,8 +665,29 @@ class Configuration:
             self._default_type_resolvers[cls] = self._get_default_resolver(cls)
         return self._default_type_resolvers[cls]
 
+    def resolve_alias(self, cls: type[T], parent_cls: type[Any] | None) -> type[Any]:
+        """
+        The type a transparent alias stands for, for the given parent.
+
+        `Annotated[Foo, ...]` and `type Foo = ...` aliases are only a
+        decorated way to refer to another type, so with no binding of
+        their own they are the type they refer to, bindings included.
+        The layers are peeled one at a time, as a binding on any of
+        them is where the resolution stops. Anything that is not an
+        alias is returned as is.
+        """
+        seen: list[Any] = [cls]
+        while _is_transparent_type(cls) and not self.has_configured_bindings(
+            cls, parent_cls=parent_cls
+        ):
+            unwrapped = _unwrap_transparent_type(cls)
+            _check_alias_does_not_loop(seen, unwrapped)
+            seen.append(unwrapped)
+            cls = unwrapped
+        return cls
+
     def has_configured_bindings(
-        self, cls: Union[type[T], Abstract[T]], parent_cls: Optional[type[Any]] = None
+        self, cls: type[T] | Abstract[T], parent_cls: type[Any] | None = None
     ) -> bool:
         """
         Whether a binding applies to the class when the parent asks for
@@ -525,8 +711,8 @@ class Injector:
 
     def get(
         self,
-        cls: Union[type[T], Abstract[T]],
-        parent_cls: Optional[type[Any]] = None,
+        cls: type[T] | Abstract[T],
+        parent_cls: type[Any] | None = None,
     ) -> T:
         # Abstract is just a trick to make mypy like
         # abstract types passed into our injector
@@ -548,15 +734,18 @@ class Injector:
 
 class InjectorContext:
     configuration: Configuration
-    stack: list[type[Any]]
+    stack: list[TypeResolver[Any]]
 
     def __init__(
-        self, configuration: Configuration, parent_cls: Optional[type[Any]] = None
+        self, configuration: Configuration, parent_cls: type[Any] | None = None
     ) -> None:
         self.configuration: Configuration = configuration
-        # What this context is building, innermost last. Only ever
-        # holds classes under construction, so it detects the cycles
-        self.stack: list[type[Any]] = []
+        # What this context is building, innermost last. The resolvers
+        # rather than the classes asked for: an alias is resolved as
+        # the type it refers to, and the same class under another
+        # binding is another thing to build. It only ever holds what
+        # is under construction, so a resolver needing itself is a cycle
+        self.stack: list[TypeResolver[Any]] = []
         # On whose behalf the root class is resolved. It selects the
         # scoped bindings for it, but it is not being built, so it does
         # not belong in the stack
@@ -565,23 +754,18 @@ class InjectorContext:
     def get(self, cls: type[T]) -> T:
         # Whatever is being built is the parent of its dependencies. The
         # root one has the parent it is resolved on behalf of, if any
-        parent_cls = self.stack[-1] if self.stack else self.parent_cls
+        parent_cls = self.stack[-1].cls if self.stack else self.parent_cls
         type_resolver = self.configuration.get_type_resolver(cls, parent_cls=parent_cls)
-        # An already resolved instance needs nothing built, so it
-        # can't be part of a cycle
-        instance = type_resolver.get_cached_instance()
-        if instance is not None:
-            return instance
-        if cls in self.stack:
+        if type_resolver in self.stack:
+            classes = [resolver.cls for resolver in self.stack]
             raise CircularDependencyError(
-                f"Unable to instantiate {self.stack[0]} because {cls} "
+                f"Unable to instantiate {classes[0]} because {cls} "
                 "causes a circular dependency. To build it, "
-                f"ultimately {self.stack[-1]} is needed that needs {cls} "
-                f"again. Dependency stack is: {self.stack}"
+                f"ultimately {classes[-1]} is needed that needs {cls} "
+                f"again. Dependency stack is: {classes}"
             )
-        self.stack.append(cls)
+        self.stack.append(type_resolver)
         try:
-            instance = type_resolver.resolve_type(injector_context=self)
+            return type_resolver.resolve_type(injector_context=self)
         finally:
             self.stack.pop()
-        return instance
