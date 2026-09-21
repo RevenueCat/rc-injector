@@ -122,6 +122,8 @@ configuration = Configuration()
 injector = Injector(configuration)
 ```
 
+The configuration has to be complete before the first `injector.get()`. What each class resolves to is settled on first use, so bindings made after that point are not seen: `bind()` raises once resolving has started, and a binding kept from before should not be extended either.
+
 ### Global bindings:
 Bind the given class to the configured type resolver.
 
@@ -184,6 +186,20 @@ class Foo:
         self.container = container or Container()
 ```
 The code is still testable, `Container` can be injected for tests (the test injector can even bind `Optional[Container]` to a mock), but it is clear that each class will use a different `Container` instance by default.
+
+### Thread safety
+Handing out a cached instance takes no lock, so once everything is built, `injector.get()` is as cheap in a multithreaded application as in a single-threaded one.
+
+Building is another matter: two threads asking at once for a class that is not built yet would each build their own instance, and the class would end up with two "singletons". To prevent it, the injector serializes the builds with a lock, taken only when something has to be built. The lock is re-entrant, so a constructor can ask the injector for more dependencies.
+
+A constructor that waits on another thread that uses the injector would deadlock on that lock, though. If you have one, turn the lock off:
+```python
+injector = Injector(configuration, thread_safe=False)
+```
+
+The lock belongs to the configuration, so injectors built on the same one serialize against each other, as they hand out the same instances.
+
+The configuration is meant to be complete before the injector is used from several threads: bindings are not guarded.
 
 ## Default values
 The injector recognizes default values and will use them unless there is a specific binding for the class.
