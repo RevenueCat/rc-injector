@@ -767,6 +767,293 @@ def test_get_with_parent_cls_needing_the_parent() -> None:
     assert handler.retries == 5
 
 
+def test_has_binding() -> None:
+    class Foo:
+        pass
+
+    class DefaultFoo(Foo):
+        pass
+
+    class Bar:
+        pass
+
+    class Baz:
+        pass
+
+    configuration = Configuration()
+    assert configuration.has_binding(Foo) is False
+    assert configuration.has_binding(Foo, parent_cls=Bar) is False
+
+    # It answers for the slot alone: a global binding is not a binding
+    # for a parent, and one scoped to a parent is not a global one
+    configuration.bind(Foo).globally().to_class(DefaultFoo)
+    assert configuration.has_binding(Foo) is True
+    assert configuration.has_binding(Foo, parent_cls=Bar) is False
+
+    configuration.bind(Foo).for_parent(Bar)
+    assert configuration.has_binding(Foo, parent_cls=Bar) is True
+    assert configuration.has_binding(Foo, parent_cls=Baz) is False
+
+    # `bind()` alone creates no slot, so it does not make one up
+    configuration.bind(Bar)
+    assert configuration.has_binding(Bar) is False
+
+
+def test_has_binding_to_fill_in_defaults() -> None:
+    class Foo:
+        pass
+
+    class DefaultFoo(Foo):
+        pass
+
+    class TestFoo(Foo):
+        pass
+
+    def apply_defaults(configuration: Configuration) -> None:
+        # Only fills the gaps, so it can run after the specific config
+        if not configuration.has_binding(Foo):
+            configuration.bind(Foo).globally().to_class(DefaultFoo)
+
+    configuration = Configuration()
+    apply_defaults(configuration)
+    assert isinstance(Injector(configuration).get(Foo), DefaultFoo)
+
+    configuration = Configuration()
+    configuration.bind(Foo).globally().to_class(TestFoo)
+    apply_defaults(configuration)
+    assert isinstance(Injector(configuration).get(Foo), TestFoo)
+
+
+def test_rebinding_without_reset_raises() -> None:
+    class Foo:
+        def __init__(self, name: str = "?") -> None:
+            self.name = name
+
+    class FooA(Foo):
+        pass
+
+    def build_foo() -> Foo:
+        return Foo("built")
+
+    # A binding that conflicts with what is configured already raises
+    Bind = Callable[[Any], Any]
+
+    def to_instance(resolver: Any) -> Any:
+        return resolver.to_instance(Foo())
+
+    def to_class(resolver: Any) -> Any:
+        return resolver.to_class(FooA)
+
+    def to_constructor(resolver: Any) -> Any:
+        return resolver.to_constructor(build_foo)
+
+    def with_kwargs(resolver: Any) -> Any:
+        return resolver.with_kwargs(name="x")
+
+    def with_arg_types(resolver: Any) -> Any:
+        return resolver.with_arg_types(name=str)
+
+    cases: list[tuple[Bind, Bind]] = [
+        # Rebinding to the same kind is as much of a conflict as to
+        # another one: two bindings for a class is two bindings
+        (to_instance, to_instance),
+        (to_class, to_class),
+        (to_constructor, to_constructor),
+        (to_class, to_instance),
+        (to_class, to_constructor),
+        (to_class, with_kwargs),
+        (to_class, with_arg_types),
+        (to_instance, to_class),
+        (to_instance, to_constructor),
+        (to_instance, with_kwargs),
+        (to_instance, with_arg_types),
+        (to_constructor, to_instance),
+        (to_constructor, to_class),
+        (with_kwargs, to_instance),
+        (with_kwargs, to_class),
+        (with_arg_types, to_instance),
+        (with_arg_types, to_class),
+    ]
+    for first, second in cases:
+        configuration = Configuration()
+        first(configuration.bind(Foo).globally())
+        with pytest.raises(InjectorConfigurationError, match="Unable to"):
+            second(configuration.bind(Foo).globally())
+        # ...and resetting the class first is what makes it fine
+        configuration.reset(Foo)
+        second(configuration.bind(Foo).globally())
+
+    # Kwargs and arg types are not a binding, so they add up and can be
+    # set before a constructor as much as after it
+    configuration = Configuration()
+    configuration.bind(Foo).globally().with_kwargs(name="first")
+    configuration.bind(Foo).globally().with_kwargs(name="second")
+    configuration.bind(Foo).globally().to_constructor(Foo)
+    assert Injector(configuration).get(Foo).name == "second"
+
+
+def test_binding_with_nothing_configured() -> None:
+    class Foo:
+        def __init__(self, name: str = "built") -> None:
+            self.name = name
+
+    class FooA(Foo):
+        pass
+
+    default_foo = Foo("signature-default")
+
+    class Needs:
+        def __init__(self, foo: Foo = default_foo) -> None:
+            self.foo = foo
+
+    # A resolver with nothing configured builds the class with its own
+    # `__init__()`, and caches it as any other
+    configuration = Configuration()
+    configuration.bind(Foo).globally()
+    injector = Injector(configuration)
+    assert type(injector.get(Foo)) is Foo
+    assert injector.get(Foo) is injector.get(Foo)
+
+    # ...but the slot is still a binding, so unlike never binding it, it
+    # overrides the default value in a signature
+    assert Injector(Configuration()).get(Needs).foo is default_foo
+    configuration = Configuration()
+    configuration.bind(Foo).globally()
+    assert Injector(configuration).get(Needs).foo.name == "built"
+
+    # ...it keeps an alias from resolving to the type it refers to
+    class NeedsBoth:
+        def __init__(self, foo: Foo, alias: Annotated[Foo, "meta"]) -> None:
+            self.foo = foo
+            self.alias = alias
+
+    both = Injector(Configuration()).get(NeedsBoth)
+    assert both.alias is both.foo
+    configuration = Configuration()
+    configuration.bind(cast(type[Foo], Annotated[Foo, "meta"])).globally()
+    both = Injector(configuration).get(NeedsBoth)
+    assert both.alias is not both.foo
+
+    # ...and scoped to a parent it shadows the global binding
+    class Bar:
+        def __init__(self, foo: Foo) -> None:
+            self.foo = foo
+
+    configuration = Configuration()
+    configuration.bind(Foo).globally().to_class(FooA)
+    configuration.bind(Foo).for_parent(Bar)
+    injector = Injector(configuration)
+    assert type(injector.get(Bar).foo) is Foo
+    assert type(injector.get(Foo)) is FooA
+
+    # `Configuration.reset()` is the one that leaves an unbound class,
+    # so the default in the signature is used again
+    configuration = Configuration()
+    configuration.bind(Foo).globally().to_class(FooA)
+    configuration.reset(Foo)
+    assert Injector(configuration).get(Needs).foo is default_foo
+
+
+def test_reset_allows_rebinding() -> None:
+    class Foo:
+        def __init__(self, name: str = "?") -> None:
+            self.name = name
+
+    class FooA(Foo):
+        pass
+
+    class Bar:
+        pass
+
+    def base_configuration() -> Configuration:
+        configuration = Configuration()
+        configuration.bind(Foo).globally().to_class(FooA)
+        configuration.bind(Foo).for_parent(Bar).with_kwargs(name="for_bar")
+        return configuration
+
+    # A shared configuration sets the defaults, and a caller resets what
+    # it wants to configure differently and binds it again
+    configuration = base_configuration()
+    pinned = Foo(name="pinned")
+    configuration.reset(Foo)
+    configuration.bind(Foo).globally().to_instance(pinned)
+    injector = Injector(configuration)
+    assert injector.get(Foo) is pinned
+    # The scoped binding went with it, it was for the same class
+    assert injector.get(Foo, parent_cls=Bar) is pinned
+
+    # Resetting a class that is not bound does nothing, so it needs no
+    # looking first
+    configuration = Configuration()
+    configuration.reset(Foo)
+    configuration.reset(Bar)
+    configuration.bind(Foo).globally().with_kwargs(name="fresh")
+    assert Injector(configuration).get(Foo).name == "fresh"
+
+
+def test_reset_leaves_the_class_as_if_never_bound() -> None:
+    class Foo:
+        def __init__(self, name: str = "built") -> None:
+            self.name = name
+
+    class FooA(Foo):
+        pass
+
+    default_foo = Foo("signature-default")
+
+    class Needs:
+        def __init__(self, foo: Foo = default_foo) -> None:
+            self.foo = foo
+
+    class Bar:
+        def __init__(self, foo: Foo) -> None:
+            self.foo = foo
+
+    class NeedsBoth:
+        def __init__(self, foo: Foo, alias: Annotated[Foo, "meta"]) -> None:
+            self.foo = foo
+            self.alias = alias
+
+    # The default in a signature is used again...
+    configuration = Configuration()
+    configuration.bind(Foo).globally().to_class(FooA)
+    configuration.reset(Foo)
+    assert Injector(configuration).get(Needs).foo is default_foo
+    assert configuration.has_binding(Foo) is False
+
+    # ...an alias resolves through to the type it refers to again...
+    configuration = Configuration()
+    configuration.bind(cast(type[Foo], Annotated[Foo, "meta"])).globally()
+    configuration.reset(cast(type[Foo], Annotated[Foo, "meta"]))
+    both = Injector(configuration).get(NeedsBoth)
+    assert both.alias is both.foo
+
+    # ...and the scoped bindings go with the global one, they are all
+    # bindings for the same class
+    configuration = Configuration()
+    configuration.bind(Foo).globally().to_class(FooA)
+    configuration.bind(Foo).for_parent(Bar).with_kwargs(name="for_bar")
+    configuration.reset(Foo)
+    assert configuration.has_binding(Foo, parent_cls=Bar) is False
+    injector = Injector(configuration)
+    assert type(injector.get(Bar).foo) is Foo
+    assert injector.get(Bar).foo.name == "built"
+
+
+def test_reset_is_frozen_once_resolving() -> None:
+    class Foo:
+        pass
+
+    # Same as `bind()`: what a class resolves to is settled on first
+    # use, so a reset after that would not be seen. It fails loudly
+    configuration = Configuration()
+    configuration.bind(Foo).globally()
+    injector = Injector(configuration)
+    injector.get(Foo)
+    with pytest.raises(InjectorConfigurationError, match="started resolving"):
+        configuration.reset(Foo)
+
+
 def test_configuration_is_frozen_once_resolving() -> None:
     class A:
         pass

@@ -214,12 +214,7 @@ class TypeResolver(Generic[T]):
         """
         Bind the class to the specific given instance
         """
-        if (
-            self._to_class is not None
-            or self._to_constructor is not None
-            or self._kwargs
-            or self._arg_types
-        ):
+        if self.is_bound() or self._kwargs or self._arg_types:
             raise InjectorConfigurationError(
                 f"Unable to bind {self.cls} to instance. Already bound: {self}"
             )
@@ -233,12 +228,7 @@ class TypeResolver(Generic[T]):
         be injected with a concrete implementation or for
         interfaces.
         """
-        if (
-            self._to_instance is not None
-            or self._to_constructor is not None
-            or self._kwargs
-            or self._arg_types
-        ):
+        if self.is_bound() or self._kwargs or self._arg_types:
             raise InjectorConfigurationError(
                 f"Unable to bind {self.cls} to class. Already bound: {self}"
             )
@@ -248,12 +238,22 @@ class TypeResolver(Generic[T]):
         """
         Use provided function to build the class
         """
-        if self._to_instance is not None or self._to_class is not None:
+        if self.is_bound():
             raise InjectorConfigurationError(
-                f"Unable to bind {self.cls} to class. Already bound: {self}"
+                f"Unable to bind {self.cls} to constructor. Already bound: {self}"
             )
         self._to_constructor = constructor
         return self
+
+    def is_bound(self) -> bool:
+        """
+        Whether the class is bound to a specific instance, class or constructor
+        """
+        return (
+            self._to_instance is not None
+            or self._to_class is not None
+            or self._to_constructor is not None
+        )
 
     def with_kwargs(self, **kwargs: Any) -> "TypeResolver[T]":
         """
@@ -495,6 +495,17 @@ class TypeResolver(Generic[T]):
                     "on the class that needs the param"
                 )
 
+    def __str__(self) -> str:
+        if self._to_instance is not None:
+            return f"TypeResolver({self.cls}) bound to instance {self._to_instance}"
+        if self._to_class is not None:
+            return f"TypeResolver({self.cls}) bound to class {self._to_class}"
+        if self._to_constructor is not None:
+            return f"TypeResolver({self.cls}) bound to constructor {self._to_constructor} with kwargs {self._kwargs} and arg types {self._arg_types}"
+        if self._kwargs or self._arg_types:
+            return f"TypeResolver({self.cls}) with no binding with kwargs {self._kwargs} and arg types {self._arg_types}"
+        return f"TypeResolver({self.cls}) with no binding"
+
     def get_cached_instance(self) -> T | None:
         return self._to_instance
 
@@ -635,6 +646,70 @@ class Configuration:
         if cls not in self.bindings:
             self.bindings[cls] = Binding[T](cls)
         return self.bindings[cls]
+
+    def reset(self, cls: type[T] | Abstract[T]) -> None:
+        """
+        Drop the binding for the class, the global and the scoped alike.
+
+        What is left is the class exactly as if it had never been bound:
+        it is built with its own `__init__()`, a default value in a
+        constructor signature is used again, and an alias resolves
+        through to the type it refers to. That is what tells it apart
+        from a binding with nothing configured on it, which is still a
+        binding and does none of those.
+
+        Resetting a class that is not bound does nothing, so a caller
+        can reset before binding without looking first:
+
+            configuration.reset(Foo)
+            configuration.bind(Foo).globally().to_instance(a_foo)
+
+        That is how a shared configuration sets the defaults and a
+        caller replaces a few of them, as a binding that conflicts with
+        what is configured already raises.
+        """
+        # Abstract is just a trick to make mypy like
+        # abstract types passed into our injector
+        assert not isinstance(cls, Abstract)  # noqa: S101
+        if self._settled_type_resolvers:
+            raise InjectorConfigurationError(
+                f"Unable to reset {cls}: the configuration can't change once "
+                "the injector has started resolving, as what each class "
+                "resolves to is settled on first use. Complete the bindings "
+                "first."
+            )
+        self.bindings.pop(cls, None)
+
+    def has_binding(
+        self, cls: type[T] | Abstract[T], parent_cls: type[Any] | None = None
+    ) -> bool:
+        """
+        Whether the class has a binding of its own in the given slot:
+        the global one with no parent, the one scoped to that parent
+        with one.
+
+        Meant for filling in the defaults of a configuration that may
+        have them already, so that binding a class twice is not even
+        attempted:
+
+            if not configuration.has_binding(Foo):
+                configuration.bind(Foo).globally().to_class(DefaultFoo)
+
+        It answers for the slot alone: a global binding is not a binding
+        for a parent, and a binding scoped to another parent is not one
+        either. What actually applies when a parent asks for the class,
+        falling back from the scoped binding to the global one, is
+        `has_configured_bindings()`.
+        """
+        # Abstract is just a trick to make mypy like
+        # abstract types passed into our injector
+        assert not isinstance(cls, Abstract)  # noqa: S101
+        binding = self.bindings.get(cls)
+        if binding is None:
+            return False
+        if parent_cls is None:
+            return binding.global_resolver is not None
+        return parent_cls in binding.scoped_resolvers
 
     def _get_default_resolver(self, cls: type[T]) -> TypeResolver[T]:
         return TypeResolver[T](cls)
