@@ -164,6 +164,48 @@ Additionally, for the default and `to_constructor` resolutions, this extra confi
 * `with_kwargs(foo=bar)`: Overrides the value of given param in the constructor.
 * `with_arg_types(foo=Foo)`: Overrides the type that will be used for the param. Similar to `for_parent(...).to_class(...)` that can also override the class, but it can work when you have two args with the same type (imagine `Processor(source: Queue, sink: Queue)`) and will also work for constructor functions.
 
+Those two are not a binding: they add up over every call, and can be set before a `to_constructor()` as much as after it.
+
+### Replacing bindings
+A class can only be bound once. Binding it again raises `InjectorConfigurationError`, whether the new binding is of the same kind as the old one or a different one, because a binding silently dropped on the floor is what a duplicated one looks like.
+
+`configuration.reset(Foo)` drops the binding for a class, so it can be bound again. That is how a shared configuration sets the defaults and a caller replaces a few of them:
+
+```python
+def base_configuration() -> Configuration:
+    configuration = Configuration()
+    configuration.bind(Database).globally().to_class(PostgresDatabase)
+    configuration.bind(Cache).globally().with_kwargs(host="cache.prod", ttl=60)
+    return configuration
+
+# In a test:
+configuration = base_configuration()
+configuration.reset(Database)
+configuration.bind(Database).globally().to_instance(FakeDatabase())
+# Kwargs add up, so this only changes the host and no reset is wanted
+configuration.bind(Cache).globally().with_kwargs(host="localhost")
+```
+
+It leaves the class exactly as if it had never been bound: built with its own `__init__()`, a default value in a constructor signature used again, and an alias resolving through to the type it refers to. That is what tells it apart from a binding with nothing configured on it (the `No to_* invoked` case above), which is still a binding and does none of those.
+
+The global binding and every scoped one go together, as they are all bindings for the same class. And resetting a class that is not bound does nothing, so a caller can reset before binding without looking first.
+
+The other way around is to fill in the defaults last, over whatever is bound already, with `has_binding()`:
+
+```python
+def apply_defaults(configuration: Configuration) -> None:
+    if not configuration.has_binding(Database):
+        configuration.bind(Database).globally().to_class(PostgresDatabase)
+
+configuration = Configuration()
+configuration.bind(Database).globally().to_instance(FakeDatabase())
+apply_defaults(configuration)   # leaves the binding above alone
+```
+
+`has_binding(cls)` answers for the global slot, and `has_binding(cls, parent_cls=Bar)` for the one scoped to `Bar`. It is about the slot alone: a global binding is not a binding for a parent, and a binding scoped to another parent is not one either. What applies when a parent asks for the class, falling back from the scoped binding to the global one, is `has_configured_bindings()`.
+
+Note that `globally()` and `for_parent(...)` hand out the same resolver on every call for a given slot, so a configuration can be built up across several calls, and even across several functions, without any of them wiping what the others set.
+
 ### Cache and singletons
 The injector will cache **ALL** types, both specifically bound and those injected using the default. This means that **ALL classes will be singletons**.
 
