@@ -501,9 +501,16 @@ class TypeResolver(Generic[T]):
         if self._to_class is not None:
             return f"TypeResolver({self.cls}) bound to class {self._to_class}"
         if self._to_constructor is not None:
-            return f"TypeResolver({self.cls}) bound to constructor {self._to_constructor} with kwargs {self._kwargs} and arg types {self._arg_types}"
+            return (
+                f"TypeResolver({self.cls}) bound to constructor "
+                f"{self._to_constructor} with kwargs {self._kwargs} "
+                f"and arg types {self._arg_types}"
+            )
         if self._kwargs or self._arg_types:
-            return f"TypeResolver({self.cls}) with no binding with kwargs {self._kwargs} and arg types {self._arg_types}"
+            return (
+                f"TypeResolver({self.cls}) with no binding with kwargs "
+                f"{self._kwargs} and arg types {self._arg_types}"
+            )
         return f"TypeResolver({self.cls}) with no binding"
 
     def get_cached_instance(self) -> T | None:
